@@ -1,0 +1,15 @@
+sample_id	patient_id	tissue_type	collection_site	cohort	batch_id	rin	dv200
+SynCohort_P01_S1	SynCohort_P01	Lung	SiteA	CohortX	Batch1	9	66.7
+SynCohort_P02_S1	SynCohort_P02	Lung	SiteA	CohortY	Batch2	9.2	89.2
+SynCohort_P03_S1	SynCohort_P03	Lung	SiteA	CohortX	Batch1	5.6	91
+SynCohort_P04_S1	SynCohort_P04	Lung	SiteA	CohortY	Batch2	8.6	50.5
+SynCohort_P05_S1	SynCohort_P05	Lung	SiteA	CohortX	Batch1	7.5	67.3
+SynCohort_P06_S1	SynCohort_P06	Lung	SiteA	CohortY	Batch2	6.9	71.3
+SynCohort_P07_S1	SynCohort_P07	Lung	SiteA	CohortX	Batch1	8.1	87.5
+SynCohort_P08_S1	SynCohort_P08	Lung	SiteA	CohortY	Batch2	4.7	51.5
+SynCohort_P09_S1	SynCohort_P09	Lung	SiteA	CohortX	Batch1	7.6	91.5
+SynCohort_P10_S1	SynCohort_P10	Lung	SiteA	CohortY	Batch2	7.9	89.5
+SynCohort_P11_S1	SynCohort_P11	Lung	SiteB	CohortX	Batch1	6.5	48.9
+SynCohort_P12_S1	SynCohort_P12	Lung	SiteB	CohortY	Batch2	8	69.2
+SynCohort_P13_S1	SynCohort_P13	Nasal	SiteA	CohortX	Batch1	9.1	63.3
+SynCohort_P14_S1	SynCohort_P14	Nasal	SiteA	CohortY	Batch2	5.4	87.6

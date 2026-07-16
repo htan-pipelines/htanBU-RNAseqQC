@@ -30,7 +30,7 @@ params:
     batch_id        = "sequencing_batch_id",
     rin             = "rin",
     dv200           = "dv200"
-  )
+    )
 
   # ---- Report labeling / subsetting ----
   tissueType: "Bulk RNA-seq QC"   # free-text title used in report headers
@@ -49,7 +49,7 @@ params:
     heterozygosity_mean    = 0.5,
     somalier_relatedness   = 0.6,
     hla_match               = 0.6
-  )
+    )
 
   # ---- Optional inputs ----
   priority_list_file: NULL   # optional .xlsx with a "Priority" column + ID columns to highlight a sample subset;
@@ -104,7 +104,7 @@ source file. `sample_id` (post-mapping) must match `colnames(se)` exactly.
 
 See `render_qc_report.R` in this repo for a complete, runnable example, and
 `generate_somalier_network.R` for the interactive sample-relatedness network
-(rendered to a standalone `somalier.html`, not embedded in this report).
+(rendered to a standalone `somalier_network_graph.html`, not embedded in this report).
 
 ## Setup
 Load required libraries, read in parameters, validate required inputs, apply the
@@ -356,8 +356,27 @@ theme_bw() %+replace%
   )
 ```
 
+```{r qc-cutoff}
+# All cutoffs come from params$qc_cutoffs (see YAML header) so they can be
+# overridden per cohort/tissue without editing this file.
+# NOTE: this chunk used to live just above "QC Metric Overview" (after tissue/site
+# subsetting), but the Sample Swap/Contamination Check section above (HLA genotype
+# check specifically) reads `hla_cutoff` -- moved up here, right after setup, so
+# every cutoff is available before it's first used anywhere in the report.
+tin_cutoff <- qc_cutoffs$tin_median
+rin_cutoff <- qc_cutoffs$rin
+threeprime_bias_cutoff <- qc_cutoffs$threeprime_bias
+gene_detected_cutoff <- qc_cutoffs$genes_detected
+exon_cv_cutoff <- qc_cutoffs$exon_cv
+rrna_rate_cutoff <- qc_cutoffs$rrna_rate
+dv200_cutoff <- qc_cutoffs$dv200
+hetero_cutoff <- qc_cutoffs$heterozygosity_mean
+somalier_cutoff <- qc_cutoffs$somalier_relatedness
+hla_cutoff <- qc_cutoffs$hla_match
+```
+
 ## Sample Swap/Contamination Check {.tabset .tabset-fade}
-Create pairwise matrix of somalier sample pairs output, calculate heterozygosity rate, and library complexity to help identify poor quality samples. 
+Create pairwise matrix of somalier sample pairs output, calculate heterozygosity rate, and library complexity to help identify poor quality samples.
 
 ```{r somalier_qc_metrics ,message = FALSE, warning = FALSE, error = FALSE}
 sample_id <- rnaAnnot$sample_id
@@ -564,7 +583,7 @@ Heatmap(mat.sf.sym, name = "relatedness", top_annotation = ha,
 The interactive sample-relatedness network (colored by patient ID and by TIN) is
 generated as a **standalone HTML file** rather than embedded in this report — run
 `generate_somalier_network.R` (in this repo) against your `somalier.pairs.tsv` to
-produce `somalier.html`. It uses the same `somalier_pairs` relatedness cutoff
+produce `somalier_network_graph.html`. It uses the same `somalier_pairs` relatedness cutoff
 (`params$qc_cutoffs$somalier_relatedness`, default 0.6) as the flagging logic below,
 and lets you interactively search/filter samples by patient — something a static plot
 embedded in this report can't do.
@@ -690,22 +709,6 @@ se.subset <- se[,which(colData(se)$tissue_type == tissue)]
 se.subset <- se.subset[,which(colData(se.subset)$collection_site == site)]
 qcMetrics.subset <- select_qc_metrics(se_object = se.subset)
 
-```
-
-
-```{r qc-cutoff}
-# All cutoffs come from params$qc_cutoffs (see YAML header) so they can be
-# overridden per cohort/tissue without editing this file.
-tin_cutoff <- qc_cutoffs$tin_median
-rin_cutoff <- qc_cutoffs$rin
-threeprime_bias_cutoff <- qc_cutoffs$threeprime_bias
-gene_detected_cutoff <- qc_cutoffs$genes_detected
-exon_cv_cutoff <- qc_cutoffs$exon_cv
-rrna_rate_cutoff <- qc_cutoffs$rrna_rate
-dv200_cutoff <- qc_cutoffs$dv200
-hetero_cutoff <- qc_cutoffs$heterozygosity_mean
-somalier_cutoff <- qc_cutoffs$somalier_relatedness
-hla_cutoff <- qc_cutoffs$hla_match
 ```
 
 
@@ -1222,7 +1225,10 @@ for (i in 1:ncol(qcMetrics.subset)) {
   }
 }
 # Filter dataset to remove constant QC metrics
-qc.metrics.unique.col <- qcMetrics.subset[-rm.ix.qc]
+# NOTE: `-rm.ix.qc` errors ("invalid argument to unary operator") when rm.ix.qc is
+# NULL, i.e. when no QC metric happens to be constant across this tissue/site subset
+# -- guard so that case (a real possibility, not just an edge case) doesn't crash.
+qc.metrics.unique.col <- if (length(rm.ix.qc) > 0) qcMetrics.subset[-rm.ix.qc] else qcMetrics.subset
 
 # ------------------------------------
 # 2. Identify Outliers in QC Metrics
@@ -2119,7 +2125,7 @@ draw(ht_pri, heatmap_legend_side = "right", annotation_legend_side = "right")
 
 
 ## Save filtered SE with appended RNA annotation
-`r if (!is.null(output_se)) paste0("The full SE object with appended RNA annotation will be saved to: ", basename(output_se), ".") else "`output_se` was not provided (NULL), so the full annotated SE is not being saved by this report."`
+`r if (!is.null(output_se)) paste0("The full SE object with appended RNA annotation will be saved to: ", basename(output_se), ".") else "output_se was not provided (NULL), so the full annotated SE is not being saved by this report."`
 ```{r save_full_object}
 # NOTE: the original script had this saveRDS() call commented out, so `output_se`
 # was documented but silently never written. Restored to actually respect the param

@@ -155,7 +155,7 @@ for (tv in tissue_values) {
 source("generate_somalier_network.R")
 generate_somalier_network(
   somalier_pairs = somalier_pairs,
-  output_html = file.path(config$output_dir, "somalier.html"),
+  output_html = file.path(config$output_dir, "somalier_network_graph.html"),
   cutoff = config$qc_cutoffs$somalier_relatedness
 )
 

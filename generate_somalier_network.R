@@ -12,11 +12,11 @@
 # its own (e.g. to click through and find sample swaps).
 #
 # Usage as a script:
-#   Rscript generate_somalier_network.R somalier.pairs.tsv somalier.html [cutoff]
+#   Rscript generate_somalier_network.R somalier.pairs.tsv somalier_network_graph.html [cutoff]
 #
 # Usage as a library (e.g. from render_qc_report.R):
 #   source("generate_somalier_network.R")
-#   generate_somalier_network(somalier_pairs, "somalier.html", cutoff = 0.6)
+#   generate_somalier_network(somalier_pairs, "somalier_network_graph.html", cutoff = 0.6)
 # ==============================================================================
 
 suppressPackageStartupMessages({
@@ -50,7 +50,7 @@ default_sample_to_patient <- function(sample_ids) {
 #'   to patient/participant IDs, used only for node coloring/grouping and to
 #'   flag cross-patient edges. Defaults to `default_sample_to_patient()`.
 generate_somalier_network <- function(somalier_pairs,
-                                       output_html = "somalier.html",
+                                       output_html = "somalier_network_graph.html",
                                        cutoff = 0.6,
                                        sample_to_patient = default_sample_to_patient) {
 
@@ -101,7 +101,12 @@ generate_somalier_network <- function(somalier_pairs,
       patient_ids[edges_df$from],
       patient_ids[edges_df$to]
     ),
-    smooth = TRUE,
+    # NOTE: a bare `smooth = TRUE` here breaks data.frame() whenever no pairs clear
+    # `cutoff` (edges_df has 0 rows): every other column is then a 0-length vector,
+    # and a length-1 scalar can't be recycled down to 0 rows ("arguments imply
+    # differing number of rows: 0, 1"). A cohort with no cross-sample relatedness
+    # above cutoff is a real, unremarkable case, so this must not error.
+    smooth = rep(TRUE, nrow(edges_df)),
     stringsAsFactors = FALSE
   )
 

@@ -21,7 +21,7 @@ cohort-wide: Aggregation/aggregate.wdl (somalier_relate/final, arcasHLA_merge,
                     |
              *** htanBU-RNAseqQC (this repo) ***
                     |
-             qc_report.Rmd (HTML)  +  somalier.html (interactive network)
+             qc_report.Rmd (HTML)  +  somalier_network_graph.html (interactive network)
 ```
 
 Run both `RNA_seq_pipeline.wdl` (once per sample) and `Aggregation/aggregate.wdl`
@@ -72,10 +72,20 @@ htanBU-RNAseqQC/
 ├── README.md
 ├── qc_report.Rmd                  # the QC report itself (parameterized R Markdown)
 ├── render_qc_report.R             # example driver: reads inputs, renders per tissue/site
-└── generate_somalier_network.R    # standalone visNetwork -> somalier.html
+├── generate_somalier_network.R    # standalone visNetwork -> somalier_network_graph.html
+└── example_data/
+    └── build_example_and_render.R # builds a synthetic SE + metadata/somalier/genotypes
+                                    # tables and renders qc_report.Rmd against them end to
+                                    # end -- a smoke test with no real data required
 ```
 
 ## Usage
+
+Don't have real pipeline outputs handy yet? `Rscript example_data/build_example_and_render.R`
+builds a small synthetic dataset (fake SE, metadata, somalier pairs, genotypes) and
+renders the full report end to end against it, writing everything to
+`example_data/output/` -- useful for confirming your R environment is set up
+correctly before pointing the pipeline at real data.
 
 1. Edit the `config` block at the top of `render_qc_report.R` to point at your
    four input files and (if needed) your `column_map`.
@@ -85,7 +95,7 @@ This renders one HTML report per `tissue_type` × `collection_site` combination
 found in your metadata (set `site_col = NULL` in the config to render one
 report per tissue type only), writes the per-sample QC flag table as a `.tsv`,
 optionally writes the tissue/site-subset `SummarizedExperiment`, and generates
-`somalier.html` — an interactive relatedness network you can open directly in
+`somalier_network_graph.html` — an interactive relatedness network you can open directly in
 a browser (search/filter by sample or patient, hover for relatedness values,
 cross-patient matches are colored red).
 
@@ -109,14 +119,22 @@ rmarkdown::render(
 
 CRAN: `tidyverse`, `RColorBrewer`, `circlize`, `ggplot2`, `pheatmap`, `ggpubr`,
 `ggrepel`, `plotly`, `igraph`, `kableExtra`, `readxl`, `Matrix`, `rmarkdown`,
-`knitr`. Bioconductor: `SummarizedExperiment`, `edgeR`, `ComplexHeatmap`. For
+`knitr`, `plyr` (used directly for `plyr::ldply()` in the QC-metrics-vs-PC-components
+table; safe alongside `dplyr` since it's only ever called via `::`, never attached).
+Bioconductor: `SummarizedExperiment`, `edgeR`, `ComplexHeatmap`. `edgeR` (via `limma`)
+additionally requires the CRAN package `statmod`, which isn't always pulled in
+automatically depending on what's already installed -- install it explicitly if
+`library(edgeR)` fails with "there is no package called 'statmod'". For
 `generate_somalier_network.R`: `dplyr` (part of tidyverse), `visNetwork`,
 `htmlwidgets`.
+
+Rendering to HTML also requires [pandoc](https://pandoc.org/installing.html)
+(bundled with RStudio; install separately if running via plain `Rscript`).
 
 ```r
 install.packages(c("tidyverse", "RColorBrewer", "circlize", "pheatmap", "ggpubr",
                     "ggrepel", "plotly", "igraph", "kableExtra", "readxl", "Matrix",
-                    "rmarkdown", "knitr", "visNetwork", "htmlwidgets"))
+                    "rmarkdown", "knitr", "plyr", "statmod", "visNetwork", "htmlwidgets"))
 if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
 BiocManager::install(c("SummarizedExperiment", "edgeR", "ComplexHeatmap"))
 ```
@@ -207,7 +225,7 @@ with the relevant column names configurable via `priority_id_cols`,
 previously drew two *static* igraph network plots (by patient ID and by TIN)
 duplicating what an interactive network shows better. Per the request to
 output this as a separate deliverable, the network is now built once by
-`generate_somalier_network.R` and saved as a standalone `somalier.html` —
+`generate_somalier_network.R` and saved as a standalone `somalier_network_graph.html` —
 not embedded in the knitted report — so it can be opened, searched, and
 filtered on its own.
 

@@ -1,0 +1,162 @@
+#!/usr/bin/env Rscript
+# ==============================================================================
+# render_qc_report.R
+#
+# Example/template driver for htanBU-RNAseqQC (qc_report.Rmd).
+#
+# Renders qc_report.Rmd once per tissue_type x collection_site combination found
+# in your metadata, after both stages of the bulk-rna-seq-pipeline have been run:
+#   1. RNA_seq_pipeline.wdl  (per sample)
+#   2. Aggregation/aggregate.wdl (across the cohort)
+#      https://github.com/htan-pipelines/bulk-rna-seq-pipeline
+#
+# Copy this file, edit the CONFIG block below to point at your own files, and run:
+#   Rscript render_qc_report.R
+# ==============================================================================
+
+suppressPackageStartupMessages({
+  library(SummarizedExperiment)
+  library(rmarkdown)
+})
+
+# ------------------------------------------------------------------------------
+# CONFIG -- edit everything in this block for your own project
+# ------------------------------------------------------------------------------
+config <- list(
+  # Path to the aggregated SummarizedExperiment .rds from Aggregation/aggregate.wdl
+  se_path = "path/to/your/Aggregated_Gene_Expression.rds",
+
+  # Path to your external per-sample metadata table (tab-separated)
+  rnaAnnot_path = "path/to/your/metadata.tsv",
+
+  # Path to somalier pairwise relatedness output from Aggregation/aggregate.wdl
+  somalier_pairs_path = "path/to/your/somalier.pairs.tsv",
+
+  # Path to arcasHLA genotype calls from Aggregation/aggregate.wdl
+  genotypes_path = "path/to/your/genotypes.tsv",
+
+  # Map YOUR metadata column names onto the canonical names the report expects.
+  # Must match params$column_map in qc_report.Rmd.
+  column_map = list(
+    sample_id       = "sample_id",         # must match colnames(se) after mapping
+    patient_id      = "patient_id",
+    tissue_type     = "tissue_type",
+    collection_site = "collection_site",
+    cohort          = "cohort",
+    batch_id        = "batch_id",
+    rin             = "rin",
+    dv200           = "dv200"
+  ),
+
+  # Free-text label used in the report title/header
+  report_title = "Bulk RNA-seq QC",
+
+  # Which columns to split reports on. Set site_col to NULL to render one report
+  # per tissue type only (no site-level split).
+  tissue_col = "tissue_type",
+  site_col   = "collection_site",
+
+  # QC flagging cutoffs -- see qc_report.Rmd YAML header for definitions.
+  # Leave as-is to use the report's built-in defaults, or override per project.
+  qc_cutoffs = list(
+    tin_median = 50, rin = 5, threeprime_bias = 0.5, genes_detected = 5000,
+    exon_cv = 1.0, rrna_rate = 0.01, dv200 = 50, heterozygosity_mean = 0.5,
+    somalier_relatedness = 0.6, hla_match = 0.6
+  ),
+
+  # Optional: spreadsheet highlighting a priority sample subset (NULL to skip)
+  priority_list_file = NULL,
+
+  # Output locations
+  output_dir = file.path("QC_output", format(Sys.Date(), "%Y%m%d")),
+  save_annotated_se = TRUE   # write the full annotated SE (output_se param) once
+)
+
+# ------------------------------------------------------------------------------
+# Read inputs
+# ------------------------------------------------------------------------------
+se <- readRDS(config$se_path)
+rnaAnnot <- read.table(config$rnaAnnot_path, sep = "\t", header = TRUE)
+somalier_pairs <- read.delim(config$somalier_pairs_path, header = TRUE, stringsAsFactors = FALSE)
+genotypes <- read.delim(config$genotypes_path)
+
+# ------------------------------------------------------------------------------
+# EXAMPLE (commented out): one-off sample ID correction.
+# Real cohorts occasionally need a fix like this (e.g. a biospecimen ID was
+# entered incorrectly upstream). This is study-specific and NOT part of the
+# general pipeline -- uncomment and adapt only if you actually need it, and do
+# it once, on cleaned copies of your files, rather than on every render.
+# ------------------------------------------------------------------------------
+# old_id <- "OLD_SAMPLE_ID"; new_id <- "CORRECTED_SAMPLE_ID"
+# colnames(se)[colnames(se) == old_id] <- new_id
+# rnaAnnot[[config$column_map$sample_id]][rnaAnnot[[config$column_map$sample_id]] == old_id] <- new_id
+# somalier_pairs$X.sample_a[somalier_pairs$X.sample_a == old_id] <- new_id
+# somalier_pairs$sample_b[somalier_pairs$sample_b == old_id] <- new_id
+# genotypes$subject[genotypes$subject == old_id] <- new_id
+
+dir.create(config$output_dir, recursive = TRUE, showWarnings = FALSE)
+
+# ------------------------------------------------------------------------------
+# Optionally save the full annotated SE once, up front
+# ------------------------------------------------------------------------------
+output_se <- if (isTRUE(config$save_annotated_se)) {
+  file.path(config$output_dir, paste0(format(Sys.Date(), "%Y%m%d"), "_annotated_Gene_Expression.rds"))
+} else NULL
+
+# ------------------------------------------------------------------------------
+# Derive the tissue x site combinations to report on directly from the metadata,
+# instead of hardcoding a fixed list -- this works for any cohort/tissue set.
+# ------------------------------------------------------------------------------
+tissue_values <- sort(unique(as.character(rnaAnnot[[config$tissue_col]])))
+site_values <- if (!is.null(config$site_col)) sort(unique(as.character(rnaAnnot[[config$site_col]]))) else NA
+
+render_one <- function(tissue_value, site_value) {
+  tag <- gsub("[^A-Za-z0-9]+", "", paste0(tissue_value, if (!is.na(site_value)) site_value else ""))
+  out_subdir <- file.path(config$output_dir, tag)
+  dir.create(out_subdir, recursive = TRUE, showWarnings = FALSE)
+
+  message("Rendering QC report for tissue='", tissue_value,
+          "'", if (!is.na(site_value)) paste0(", site='", site_value, "'") else "", " ...")
+
+  rmarkdown::render(
+    "qc_report.Rmd",
+    params = list(
+      se = se,
+      rnaAnnot = rnaAnnot,
+      somalier_pairs = somalier_pairs,
+      genotypes = genotypes,
+      column_map = config$column_map,
+      tissueType = config$report_title,
+      tissue = tissue_value,
+      site = if (is.na(site_value)) NULL else site_value,
+      qc_cutoffs = config$qc_cutoffs,
+      priority_list_file = config$priority_list_file,
+      output_se = output_se,
+      output_se_per = file.path(out_subdir, paste0(format(Sys.Date(), "%Y%m%d"), "_", tag, "_Gene_Expression.rds")),
+      qcFile = file.path(out_subdir, paste0(format(Sys.Date(), "%Y%m%d"), "_", tag, "_QC_FlagSummary.tsv")),
+      showSession = TRUE
+    ),
+    output_file = paste0(format(Sys.Date(), "%Y%m%d"), "_", tag, "_QCReport.html"),
+    output_dir = out_subdir,
+    intermediates_dir = out_subdir
+  )
+}
+
+for (tv in tissue_values) {
+  for (sv in site_values) {
+    render_one(tv, sv)
+  }
+}
+
+# ------------------------------------------------------------------------------
+# Also generate the interactive somalier relatedness network as a standalone
+# HTML file (kept out of the Rmd report itself -- see generate_somalier_network.R)
+# ------------------------------------------------------------------------------
+source("generate_somalier_network.R")
+generate_somalier_network(
+  somalier_pairs = somalier_pairs,
+  output_html = file.path(config$output_dir, "somalier.html"),
+  cutoff = config$qc_cutoffs$somalier_relatedness
+)
+
+message("Done. Reports written under: ", normalizePath(config$output_dir))

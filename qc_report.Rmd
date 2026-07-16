@@ -1,0 +1,2147 @@
+---
+title: "htanBU-RNAseqQC: Bulk RNA-seq QC Report"
+date: "`r Sys.Date()`"
+output:
+ html_document:
+     toc: true
+     toc_float: true
+     number_sections: true
+     theme: cosmo
+     code_folding: hide
+     keep_md: true
+params:
+  # ---- Required inputs (no sensible default; render() will error early if missing) ----
+  se: NULL                 # SummarizedExperiment produced by aggregate.wdl (combine_se task)
+  rnaAnnot: NULL            # data.frame/tibble of external per-sample metadata (e.g. Terra data table export)
+  somalier_pairs: NULL      # data.frame from Aggregation/somalier_final.wdl pairwise output (somalier.pairs.tsv)
+  genotypes: NULL           # data.frame from Aggregation/arcasHLA_merge.wdl (genotypes.tsv)
+
+  # ---- Column-name mapping ----
+  # This report standardizes on the canonical column names below (right-hand side).
+  # Point each entry at whatever column holds that information in YOUR rnaAnnot file.
+  # Only `sample_id` is strictly required to match colnames(se); the rest are used for
+  # grouping/plotting and can be left as-is (or NA) if you don't have that field.
+  column_map: !r list(
+    sample_id       = "entity.pcga2_biospecimen_id",
+    patient_id      = "patient_ID",
+    tissue_type     = "tissue_type",
+    collection_site = "collection_site",
+    cohort          = "cohort",
+    batch_id        = "sequencing_batch_id",
+    rin             = "rin",
+    dv200           = "dv200"
+  )
+
+  # ---- Report labeling / subsetting ----
+  tissueType: "Bulk RNA-seq QC"   # free-text title used in report headers
+  tissue: NULL                     # value of `tissue_type` to subset on for section 2 (NULL = use all samples)
+  site: NULL                       # value of `collection_site` to subset on for section 2 (NULL = don't filter by site)
+
+  # ---- QC flagging cutoffs (see "QC cutoffs used in this report" for definitions) ----
+  qc_cutoffs: !r list(
+    tin_median            = 50,
+    rin                   = 5,
+    threeprime_bias       = 0.5,
+    genes_detected        = 5000,
+    exon_cv                = 1.0,
+    rrna_rate              = 0.01,
+    dv200                  = 50,
+    heterozygosity_mean    = 0.5,
+    somalier_relatedness   = 0.6,
+    hla_match               = 0.6
+  )
+
+  # ---- Optional inputs ----
+  priority_list_file: NULL   # optional .xlsx with a "Priority" column + ID columns to highlight a sample subset;
+                              # the "Priority samples" heatmap section is skipped when this is NULL
+  priority_id_cols: !r c("RNA biospecimen ID", "Parent biospecimen ID")
+  priority_column: "Priority"
+  priority_value: "High"
+
+  # ---- Outputs ----
+  output_se: NULL          # path to save the full annotated SE (skipped if NULL)
+  output_se_per: NULL      # path to save the tissue/site-subset SE (skipped if NULL)
+  qcFile: "qc_flag_summary.tsv"   # path to write the per-sample QC flag table (TSV)
+  showSession: TRUE
+---
+
+# `r params$tissueType`
+
+This report performs quality control (QC) on bulk RNA-seq data produced by the
+[bulk-rna-seq-pipeline](https://github.com/htan-pipelines/bulk-rna-seq-pipeline)
+(`RNA_seq_pipeline.wdl` run per sample, aggregated with `Aggregation/aggregate.wdl`).
+It reads the aggregated `SummarizedExperiment`, layers on external sample metadata,
+somalier relatedness, and HLA genotype calls, and walks through: general sample
+statistics, sample-swap/contamination checks, per-metric QC scatterplots against
+configurable cutoffs, expression-based outlier detection (correlation + PCA),
+QC-metric clustering, sex-check from XIST/Y-linked gene expression, and a combined
+per-sample QC flag summary.
+
+## Required inputs
+
+This report is meant to run **after** you have completed both stages of the
+bulk-rna-seq-pipeline:
+
+1. **`RNA_seq_pipeline.wdl`** run once per sample (produces the per-sample gene/isoform
+   `SummarizedExperiment`, FastQC, STAR, RNA-SeQC2, RSeQC TIN, samtools, somalier
+   extraction, and arcasHLA genotyping outputs — see pipeline diagram).
+2. **`Aggregation/aggregate.wdl`** run once across all samples in the cohort (produces
+   the combined `SummarizedExperiment`, `somalier.pairs.tsv`, and `genotypes.tsv`).
+
+You need to supply the following four objects/files as `params` when rendering:
+
+| Param | What it is | Produced by | Example |
+|---|---|---|---|
+| `se` | Aggregated `SummarizedExperiment` (assays: `expected_count`, `TPM`, `FPKM`; `colData` has per-sample QC columns prefixed `fastqc_`, `STAR_`, `rnaseqc_`, `samtools_`, `TIN_`, plus `Somalier`/`Genotypes` summaries) | `Aggregation/aggregate.wdl` -> `combine_se.wdl` | `PCGA2_Gene_Expression.rds`, loaded with `readRDS()` |
+| `rnaAnnot` | Per-sample external metadata table (sample ID, patient/participant ID, tissue type, collection site, cohort, batch, RIN, DV200, etc.) | Your own sample-tracking sheet / Terra data table export | `read.table("metadata.tsv", sep = "\t", header = TRUE)` |
+| `somalier_pairs` | Pairwise sample relatedness | `Aggregation/aggregate.wdl` -> `somalier_final.wdl` | `read.delim("somalier.pairs.tsv")` |
+| `genotypes` | Per-sample HLA genotype calls | `Aggregation/aggregate.wdl` -> `arcasHLA_merge.wdl` | `read.delim("genotypes.tsv")` |
+
+The `column_map` param tells the report which columns in `rnaAnnot` correspond to the
+sample ID, patient ID, tissue type, collection site, cohort, and batch — update it to
+match your own metadata sheet's column names; you do not need to rename anything in your
+source file. `sample_id` (post-mapping) must match `colnames(se)` exactly.
+
+See `render_qc_report.R` in this repo for a complete, runnable example, and
+`generate_somalier_network.R` for the interactive sample-relatedness network
+(rendered to a standalone `somalier.html`, not embedded in this report).
+
+## Setup
+Load required libraries, read in parameters, validate required inputs, apply the
+column-name mapping, and set up display options for the report.
+
+```{r setup, message = FALSE}
+# NOTE on dependencies: the original PCGA02 script loaded 33 packages, of which
+# roughly half (DESeq2, sva, patchwork, gridExtra, lubridate, stringr, stringi,
+# viridis, fgsea, ggprism, rstatix, glue, Hmisc, mixtools, plotmm, fields,
+# ggraph, jsonlite) were never actually called anywhere in the report code --
+# most likely carried over from a shared lab template. They've been dropped
+# here to keep the dependency footprint (and install time) down for a public
+# QC pipeline; the list below is only what qc_report.Rmd actually uses.
+# `Matrix`, `knitr`, `methods`, and `utils` are used via `::` and don't need
+# an explicit library() call (Matrix must still be installed).
+suppressPackageStartupMessages({
+  library(SummarizedExperiment)
+  library(edgeR)
+  library(RColorBrewer)
+  library(circlize)
+  library(ggplot2)
+  library(pheatmap)
+  library(grid)
+  library(readxl)
+  library(ggpubr)
+  library(ComplexHeatmap)
+  library(ggrepel)
+  library(plotly)
+  library(tidyverse)
+  library(igraph)
+  library(kableExtra)
+})
+
+# ---- Read in params ----
+se <- params$se
+rnaAnnot <- params$rnaAnnot
+somalier_pairs <- params$somalier_pairs
+genotypes <- params$genotypes
+column_map <- params$column_map
+tissueType <- params$tissueType
+tissue <- params$tissue
+site <- params$site
+qc_cutoffs <- params$qc_cutoffs
+priority_list_file <- params$priority_list_file
+priority_id_cols <- params$priority_id_cols
+priority_column <- params$priority_column
+priority_value <- params$priority_value
+output_se <- params$output_se
+output_se_per <- params$output_se_per
+qcFile <- params$qcFile
+showSession <- params$showSession
+
+# ---- Validate required inputs up front, fail fast with a clear message ----
+required_params <- c("se", "rnaAnnot", "somalier_pairs", "genotypes")
+missing_params <- required_params[vapply(mget(required_params), is.null, logical(1))]
+if (length(missing_params) > 0) {
+  stop(
+    "htanBU-RNAseqQC: missing required param(s): ", paste(missing_params, collapse = ", "),
+    ". See the 'Required inputs' section of this report / README.md for what each one is."
+  )
+}
+if (!methods::is(se, "SummarizedExperiment")) {
+  stop("htanBU-RNAseqQC: `se` must be a SummarizedExperiment object (see combine_se.wdl output).")
+}
+
+# Small helper used throughout the report to build a discrete color palette that always
+# has exactly as many colors as there are factor levels (avoids silently recycled /
+# missing colors when a cohort has more or fewer groups than the original PCGA dataset).
+mk_disc_cols <- function(x, palette = "Set1") {
+  lev <- sort(unique(as.character(x)))
+  n <- length(lev)
+  base <- RColorBrewer::brewer.pal(min(9, max(3, n)), palette)
+  cols <- if (n <= length(base)) base[seq_len(n)] else grDevices::colorRampPalette(base)(n)
+  setNames(cols, lev)
+}
+
+# Set up Rmarkdown display options
+dev <- c("png", "pdf")
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  cache = FALSE,
+  cache.lazy = FALSE,
+  cache.comments = FALSE,
+  fig.align = "center",
+  fig.keep = "all",
+  dev = dev
+)
+```
+
+## Clean up metadata
+
+Apply `column_map` so the rest of the report can refer to canonical column names
+(`sample_id`, `patient_id`, `tissue_type`, `collection_site`, `cohort`, `batch_id`,
+`RIN`, `DV200`) regardless of what they're called in your source metadata file.
+
+```{r}
+# Rename whichever columns in rnaAnnot are configured in column_map to their
+# canonical names. Missing/optional fields (e.g. no `cohort` column) are simply skipped.
+for (canonical_name in names(column_map)) {
+  source_name <- column_map[[canonical_name]]
+  if (!is.null(source_name) && source_name %in% colnames(rnaAnnot)) {
+    colnames(rnaAnnot)[colnames(rnaAnnot) == source_name] <- canonical_name
+  }
+}
+colnames(rnaAnnot)[colnames(rnaAnnot) == "rin"] <- "RIN"
+colnames(rnaAnnot)[colnames(rnaAnnot) == "dv200"] <- "DV200"
+
+if (!"sample_id" %in% colnames(rnaAnnot)) {
+  stop("htanBU-RNAseqQC: after applying `column_map`, rnaAnnot has no `sample_id` column. ",
+       "Update params$column_map$sample_id to the column in your metadata file that matches colnames(se).")
+}
+
+mismatched_ids <- rnaAnnot$sample_id[!(rnaAnnot$sample_id %in% colnames(se))]
+if (length(mismatched_ids) > 0) {
+  warning("htanBU-RNAseqQC: ", length(mismatched_ids),
+          " sample_id(s) in rnaAnnot were not found in colnames(se): ",
+          paste(utils::head(mismatched_ids, 10), collapse = ", "),
+          if (length(mismatched_ids) > 10) ", ..." else "")
+}
+
+# Re-order rnaAnnot to match the sample order in the SummarizedExperiment
+rnaAnnot <- rnaAnnot[match(colnames(se), rnaAnnot$sample_id), ]
+rownames(rnaAnnot) <- gsub(" ", "", rnaAnnot$sample_id)
+```
+
+
+## General Statistics Plots {.tabset .tabset-fade}
+
+### Tissue type
+
+```{r tissue_type}
+
+colors <- mk_disc_cols(rnaAnnot$tissue_type, "Set1")
+
+ggplot(rnaAnnot, aes(tissue_type, fill = tissue_type)) +
+  geom_bar(position = position_fill()) +
+  geom_text(aes(label = ..count..),
+            stat = "count",
+            colour = "white",
+            position = position_fill(vjust = 0.3),size=9) +
+  geom_text(aes(label = paste0(round(..count../sum(..count..)*100,2), "%")),
+            stat = "count",
+            colour = "white",
+            position = position_fill(vjust = 0.5),size=9) +
+  scale_fill_manual(values = colors) +
+  coord_flip() +
+  guides(fill = guide_legend(title = "Tissue type"))+
+  theme_bw() %+replace%
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank(),
+          text = element_text(size = 19, family = "serif"),
+          axis.ticks = element_blank(),
+          axis.title.y = element_blank(),
+          axis.title.x = element_blank(),
+          axis.text.x = element_blank(),
+          axis.text.y = element_text(color = "black"),
+          legend.position = "top",
+          legend.text = element_text(size = 15),
+          legend.key.size = unit(1, "char")
+    )
+```
+
+### Tissue type per participant
+
+```{r tissue_per_participant}
+# tissue per patient ID 
+summary.samples <-  rnaAnnot %>% select(sample_id,patient_id,tissue_type, collection_site, cohort) %>%
+  dplyr::group_by(patient_id, tissue_type, collection_site, cohort) %>%
+  dplyr::count(patient_id)
+#summary.samples
+
+ggplot(summary.samples, aes(x=patient_id, y=n))+
+  geom_bar(aes(fill=tissue_type),stat="identity",position="stack")+
+  labs(y="Total tissue count", x = "Participant")+
+  #scale_y_continuous(breaks = round(seq(min(summary.samples$n),max(summary.samples$n), by = 1),1))+
+  scale_y_continuous(breaks = round(seq(min(summary.samples$n),15, by = 1),1))+
+  scale_fill_manual(values = colors) +
+  #theme(axis.text.x = element_text(angle=-90, hjust=.1))
+  guides(fill = guide_legend(title = "Tissue type"))+
+theme_bw() %+replace%
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank(),
+          text = element_text(size = 19, family = "serif"),
+          axis.ticks = element_blank(),
+          #axis.title.y = element_blank(),
+          #axis.title.x = element_blank(),
+          #axis.text.x = element_blank(),
+          axis.text.x = element_text(angle=-90, hjust=.1),
+          axis.text.y = element_text(color = "black"),
+          legend.position = "top",
+          legend.text = element_text(size = 20),
+          legend.key.size = unit(1, "char")
+    )
+```
+
+### Tissue typer per site
+
+```{r tissue_per_site}
+colors <- mk_disc_cols(rnaAnnot$collection_site, "Set1")
+ggplot(summary.samples, aes(fill=collection_site, y=n, x=tissue_type))+
+  geom_bar(stat="identity",position="stack")+
+  labs(y="Total tissue count", x = NULL)+
+  #scale_y_continuous(breaks = round(seq(min(summary.samples$n),max(summary.samples$n), by = 1),1))+
+  #scale_y_continuous(breaks = round(seq(min(summary.samples$n),15, by = 1),1))+
+  scale_fill_manual(values = colors) +
+  #theme(axis.text.x = element_text(angle=-90, hjust=.1))
+  guides(fill = guide_legend(title = "Collection site"))+
+theme_bw() %+replace%
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank(),
+          text = element_text(size = 19, family = "serif"),
+          axis.ticks = element_blank(),
+          #axis.title.y = element_blank(),
+          axis.title.x = element_blank(),
+          #axis.text.x = element_blank(),
+          #axis.text.x = element_text(angle=-90, hjust=.1),
+          axis.text.y = element_text(color = "black"),
+          legend.position = "top",
+          legend.text = element_text(size = 20),
+          legend.key.size = unit(1, "char")
+    )
+```
+
+### Tissue type per cohort
+
+```{r tissue_per_cohort}
+colors <- mk_disc_cols(rnaAnnot$cohort, "Set1")
+ggplot(summary.samples, aes(fill=cohort, y=n, x=tissue_type))+
+geom_bar(stat="identity",position="stack")+
+labs(y="Total tissue count", x = NULL)+
+scale_fill_manual(values = colors) +
+guides(fill = guide_legend(title = "Cohort"))+
+theme_bw() %+replace%
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        text = element_text(size = 19, family = "serif"),
+        axis.ticks = element_blank(),
+        axis.title.x = element_blank(),
+        axis.text.y = element_text(color = "black"),
+        legend.position = "top",
+        legend.text = element_text(size = 20),
+        legend.key.size = unit(1, "char")
+  )
+```
+
+## Sample Swap/Contamination Check {.tabset .tabset-fade}
+Create pairwise matrix of somalier sample pairs output, calculate heterozygosity rate, and library complexity to help identify poor quality samples. 
+
+```{r somalier_qc_metrics ,message = FALSE, warning = FALSE, error = FALSE}
+sample_id <- rnaAnnot$sample_id
+participant_id <- rnaAnnot$patient_id
+# Initialize matrix
+mat.sf <- matrix(0, nrow = length(sample_id), ncol = length(sample_id), dimnames = list(sample_id, sample_id))
+
+# Iterate over sample pairs and populate matrix
+for (i in seq_along(sample_id)) {
+  relatedness_values <- somalier_pairs %>% 
+    filter(sample_b == sample_id[i]) %>% 
+    pull(relatedness)  # Extracts relatedness as a vector
+  
+  if (length(relatedness_values) > 0) {  # Check if non-empty
+    mat.sf[i, 1:length(relatedness_values)] <- relatedness_values
+  }
+}
+
+# Make matrix symmetric
+mat.sf.sym <- as.matrix(Matrix::forceSymmetric(mat.sf, uplo="L"))
+
+# Assign row and column names
+rownames(mat.sf.sym) <- sample_id
+colnames(mat.sf.sym) <- sample_id
+
+
+####### Compute heterozygosity rates
+somalier_pairs <- somalier_pairs %>%
+  mutate(
+    heterozygosity_rate_a = round(hets_a / (hets_a + hom_alts_a), 3),
+    heterozygosity_rate_b = round(hets_b / (hets_b + hom_alts_b), 3)
+  )
+
+# Initialize matrices
+het_data <- matrix(0, nrow = length(sample_id), ncol = length(sample_id), dimnames = list(sample_id, sample_id))
+het_mat <- matrix(0, nrow = length(sample_id), ncol = length(sample_id), dimnames = list(sample_id, sample_id))
+
+# Populate matrices
+for (i in seq_along(sample_id)) {
+  # Extract heterozygosity rate A
+  het_values_a <- somalier_pairs %>%
+    filter(X.sample_a == sample_id[i]) %>%
+    pull(heterozygosity_rate_a)  # Extract as vector
+
+  # Extract heterozygosity rate B
+  het_values_b <- somalier_pairs %>%
+    filter(sample_b == sample_id[i]) %>%
+    pull(heterozygosity_rate_b)
+
+  if (length(het_values_a) > 0) het_data[i, 1:length(het_values_a)] <- het_values_a
+  if (length(het_values_b) > 0) het_mat[i, 1:length(het_values_b)] <- het_values_b
+}
+
+# Combine heterozygosity data
+het_comb <- het_data[, 1]
+het_comb[length(het_comb)] <- het_mat[nrow(het_mat), 1]
+
+# Add heterozygosity mean to RNA annotation
+rnaAnnot$heterozygosity_mean <- het_comb
+
+####### Compute Library complexity 
+# #Gene count data is the expected counts stored in the summarized experiment
+#Create a DGE object
+data.dge <- c()
+data.dge <- DGEList(counts = assays(se)$expected_count)
+
+## rank genes with most reads to fewest reads and take the top 50 genes
+indx.50 =apply(data.dge$counts, 2, function(x) order(x, decreasing = TRUE))[1:50]
+top50genes <- data.dge$counts[indx.50,]
+lib.compelx.50 <- diag(apply(data.dge$counts, 2, function(x) (apply(top50genes, 2, function(x) sum(x)))/ sum(x))) # output values diag
+
+## rank genes with most reads to fewest reads and take the top 500 genes
+indx.500 =apply(data.dge$counts, 2, function(x) order(x, decreasing = TRUE))[1:500]
+top500genes <- data.dge$counts[indx.500,]
+lib.compelx.500 <- diag(apply(data.dge$counts, 2, function(x) (apply(top500genes, 2, function(x) sum(x)))/ sum(x))) # output values diag
+
+## rank genes with most reads to fewest reads and take the top 1000 genes
+indx.1000 =apply(data.dge$counts, 2, function(x) order(x, decreasing = TRUE))[1:1000]
+top1000genes <- data.dge$counts[indx.1000,]
+lib.compelx.1000 <- diag(apply(data.dge$counts, 2, function(x) (apply(top1000genes, 2, function(x) sum(x)))/ sum(x))) # output values diag
+
+rnaAnnot$library_complexity_50 <- lib.compelx.50
+rnaAnnot$library_complexity_500 <- lib.compelx.500
+rnaAnnot$library_complexity_1000 <- lib.compelx.1000
+#add rna annotation to the summarized experiment
+colData(se) <- cbind(colData(se),rnaAnnot[,colnames(rnaAnnot)[!colnames(rnaAnnot) %in% colnames(colData(se))]])
+
+```
+
+
+### Filtering out non-numeric QC metrics from SE object 
+
+```{r}
+select_qc_metrics <- function(se_object) {
+  #Remove fastqc and other QC metrics 
+  list_to_remove = c("fastqc","Somalier","Genotypes","rnaseqc_Sample",colnames(rnaAnnot)[!colnames(rnaAnnot) %in% c("RIN","DV200","heterozygosity_mean")])
+  #Empty vector to store index of qc metrics 
+  qc_to_exclude = c()
+  for (i in list_to_remove){
+    names_qc <- grep(paste0("^",i),colnames(colData(se_object)),ignore.case = TRUE)
+    qc_to_exclude <- c(qc_to_exclude,names_qc)
+    #remove_t <- grep(i,colnames(colData(se)),ignore.case = TRUE)
+  }
+  #Remove fastqc and other QC metrics and keep the rest 
+  qc.metrics <- colData(se_object)[-qc_to_exclude]
+  #Remove % sign for some rows 
+  qc.metrics@listData <- lapply(qc.metrics@listData, FUN = function(x){gsub("%","",x)})
+  # convert character type to numeric type 
+  qc.metrics@listData <- lapply(qc.metrics@listData, FUN = function(y){if(is.character(y)) as.numeric(y) else y})
+  return(qc.metrics)
+}
+## All samples 
+qc.metrics <- select_qc_metrics(se_object = se)
+```
+
+### Somalier relatedness Heatmap semi-supervised 
+ 
+```{r somalier_semi_supervised_heatmap, fig.width = 32, fig.height = 16}
+##### heatmap---- start
+mat.sf.sym <- apply(mat.sf.sym, 1, function(x) ifelse(x > 1, 1, ifelse(x < -1, -1, x)))
+#mat.sf.sym <- apply(mat.sf.sym, 1, function(x) ifelse(x > 0.4, 0.4, ifelse(x < -0.4, 0, x)))
+
+# mk_disc_cols() is defined once in the setup chunk and reused here
+colorList <- list(
+  sample_type = mk_disc_cols(rnaAnnot$tissue_type, "Set1"),
+  site        = mk_disc_cols(rnaAnnot$collection_site, "Set1"),
+  cohort      = mk_disc_cols(rnaAnnot$cohort, "Set1")
+)
+
+cont_fun <- function(v) circlize::colorRamp2(
+  quantile(v, c(0.05, 0.5, 0.95), na.rm = TRUE),
+  c("navy", "white", "firebrick")
+)
+# continuous annotation columns
+colorList <- c(colorList, list(
+  star_uniquely_mapped_per             = cont_fun(qc.metrics$STAR_uniquely_mapped_percent),
+  rnaseqc_median_transcript_coverage   = cont_fun(qc.metrics$rnaseqc_Median.of.Avg.Transcript.Coverage),
+  rnaseqc_rRNA_rate                    = cont_fun(qc.metrics$rnaseqc_rRNA.Rate),
+  rnaseqc_high_quality_reads           = cont_fun(qc.metrics$rnaseqc_High.Quality.Reads),
+  samtools_properly_paired             = cont_fun(qc.metrics$samtools_reads_properly_paired),
+  ranseqc_low_quality_reads            = cont_fun(qc.metrics$rnaseqc_Low.Quality.Reads)
+))
+
+
+ha = HeatmapAnnotation(
+  df = data.frame(participant = rnaAnnot$patient_id, sample_type= rnaAnnot$tissue_type,
+                  site = rnaAnnot$collection_site, cohort= rnaAnnot$cohort,
+                  star_uniquely_mapped_per = qc.metrics$STAR_uniquely_mapped_percent,
+                  rnaseqc_median_transcript_coverage = qc.metrics$rnaseqc_Median.of.Avg.Transcript.Coverage,
+                  rnaseqc_rRNA_rate = qc.metrics$rnaseqc_rRNA.Rate,
+                  rnaseqc_high_quality_reads = qc.metrics$rnaseqc_High.Quality.Reads,
+                  samtools_properly_paired = qc.metrics$samtools_reads_properly_paired,
+                  ranseqc_low_quality_reads = qc.metrics$rnaseqc_Low.Quality.Reads
+                  ),
+  annotation_height = unit(4, "mm"),annotation_name_side = "left", col = colorList
+)
+dend1 = cluster_within_group(mat.sf.sym, rnaAnnot$patient_id)
+Heatmap(mat.sf.sym, name = "relatedness", top_annotation = ha,
+        show_row_names = FALSE, show_column_names = TRUE,
+        heatmap_legend_param = list(at = c(-1, 0, 1)),
+        row_names_gp = gpar(fontsize = 5),
+        column_names_gp = gpar(fontsize = 5),
+        cluster_columns = dend1, cluster_rows = TRUE, column_names_centered = T
+        #column_names_rot = 45,
+        #row_names_max_width = unit(10, "cm"),
+        #column_names_max_height = unit(9,"cm"),
+        #rowAnnotation(hetero_rate = anno_barplot(het_comb, width = unit(4, "cm")))
+) +
+  Heatmap(het_comb, name = "heterozygosity rate", row_names_gp = gpar(fontsize = 5),
+          top_annotation = HeatmapAnnotation(summary = anno_summary(gp = gpar(fill = 2:6),
+                                                                    height = unit(2, "cm"),
+                                                                    width = unit(2,"cm"))), width = unit(7, "mm")) +
+  rowAnnotation("heterozygosity rate" = anno_barplot(het_comb, width = unit(4, "cm"),gp = gpar(fill = 5)))
+
+
+```
+
+### Somalier relatedness Heatmap unsupervised 
+
+```{r somalier_unsupervised_heatmap,  fig.width = 32, fig.height = 16}
+# pdf("/rprojectnb/pulmseq/SFStudy/qc/somalier_heatmaps/heatmap_somalier_relatedness_QC_cluster.pdf", width = 24, height = 12)
+Heatmap(mat.sf.sym, name = "relatedness", top_annotation = ha,
+        show_row_names = FALSE, show_column_names = TRUE,
+        heatmap_legend_param = list(at = c(-1, 0, 1)),
+        row_names_gp = gpar(fontsize = 5),
+        column_names_gp = gpar(fontsize = 5),
+        #cluster_columns = TRUE, cluster_rows = TRUE, column_names_centered = T
+        cluster_columns = TRUE, cluster_rows = TRUE, column_names_centered = T
+        #column_names_rot = 45,
+        #row_names_max_width = unit(10, "cm"),
+        #column_names_max_height = unit(9,"cm"),
+        #rowAnnotation(hetero_rate = anno_barplot(het_comb, width = unit(4, "cm")))
+) +
+  Heatmap(het_comb, name = "heterozygosity rate", row_names_gp = gpar(fontsize = 5),
+          top_annotation = HeatmapAnnotation(summary = anno_summary(gp = gpar(fill = 2:6),
+                                                                    height = unit(2, "cm"),
+                                                                    width = unit(2,"cm"))), width = unit(7, "mm")) +
+  rowAnnotation("heterozygosity rate" = anno_barplot(het_comb, width = unit(4, "cm"),gp = gpar(fill = 5)))
+# dev.off()
+```
+
+### Somalier relatedness network graph
+
+The interactive sample-relatedness network (colored by patient ID and by TIN) is
+generated as a **standalone HTML file** rather than embedded in this report — run
+`generate_somalier_network.R` (in this repo) against your `somalier.pairs.tsv` to
+produce `somalier.html`. It uses the same `somalier_pairs` relatedness cutoff
+(`params$qc_cutoffs$somalier_relatedness`, default 0.6) as the flagging logic below,
+and lets you interactively search/filter samples by patient — something a static plot
+embedded in this report can't do.
+
+<!--
+The `hla_folder` (per-sample sample.genotype.json / sample.genes.json from arcasHLA
+genotype) based cross-checking approach was dropped from this report: it duplicated
+the section below (which uses the already-aggregated genotypes.tsv from
+arcasHLA_merge.wdl) and required a per-sample file layout most users won't have handy.
+If you do have the per-sample JSON files and want read-count-weighted HLA comparisons,
+see the git history of PCGA02_BulkRNA_QC_v2.Rmd in the PCGA project repo for the
+original (commented-out) implementation.
+-->
+
+### HLA Genotype Quality Assessment (use genotypes.tsv)
+```{r HLA_genotype_check_alt, fig.width=30, fig.height=16}
+genotype.pairs <- function(x) {
+  # Generate all pairwise sample combinations
+  pairs <- combn(rownames(x), 2, simplify = FALSE)
+
+  # Preallocate result as a data frame
+  comp <- data.frame(
+    sample_a = character(length(pairs)),
+    sample_b = character(length(pairs)),
+    percentOFcomparison = numeric(length(pairs)),
+    stringsAsFactors = FALSE
+  )
+
+  # Compute pairwise comparisons efficiently
+  for (i in seq_along(pairs)) {
+    row_a <- pairs[[i]][1]
+    row_b <- pairs[[i]][2]
+
+    a_vec <- x[row_a, ]
+    b_vec <- x[row_b, ]
+
+    # Compute similarity as a fraction of total HLA fields being compared
+    # (e.g. arcasHLA's default 7-gene x 2-allele genotype call = 14 columns;
+    # computed from ncol(x) rather than hardcoded so this works for any
+    # HLA-typing panel width)
+    shared_features <- sum(a_vec %in% b_vec)
+    comp$sample_a[i] <- row_a
+    comp$sample_b[i] <- row_b
+    comp$percentOFcomparison[i] <- round(shared_features / ncol(x), 2)
+  }
+
+  return(comp)
+}
+
+# Preprocess the genotypes param (already read in by render_qc_report.R / your caller;
+# NOTE: this used to re-read a hardcoded "TerraOutput/genotypes.tsv" path here, silently
+# ignoring params$genotypes -- fixed so the report always uses what was passed in)
+genotypes <- genotypes %>%
+  arrange(subject) %>%
+  column_to_rownames("subject")  # Convert "subject" column to rownames
+geno.all.pairs <- genotype.pairs(genotypes)
+
+# Create an adjacency matrix
+samples <- unique(c(geno.all.pairs$sample_a, geno.all.pairs$sample_b))
+n <- length(samples)
+adj_matrix <- matrix(0, nrow = n, ncol = n, dimnames = list(samples, samples))
+
+# Iterate over each row in geno.all.pairs
+for (i in 1:nrow(geno.all.pairs)) {
+  sample_a <- geno.all.pairs$sample_a[i]  # First sample
+  sample_b <- geno.all.pairs$sample_b[i]  # Second sample
+  matchPercent <- geno.all.pairs$percentOFcomparison[i]  # Relatedness value
+
+  # Only add edge if relatedness is >= the configured HLA match cutoff
+  if (matchPercent >= hla_cutoff) {
+    idx1 <- which(rownames(adj_matrix) == sample_a)
+    idx2 <- which(rownames(adj_matrix) == sample_b)
+
+    # Ensure both samples exist in merged_qc before adding edges
+    if (length(idx1) > 0 & length(idx2) > 0) {
+      adj_matrix[idx1, idx2] <- 1  # Add edge
+      adj_matrix[idx2, idx1] <- 1  # Ensure symmetry
+    }
+  }
+}
+
+# Create an igraph object from the adjacency matrix
+network <- graph_from_adjacency_matrix(adj_matrix, mode = "undirected", weighted = NULL, diag = FALSE)
+
+
+patient_ids <- sapply(strsplit(samples,"_"), function(x) paste(x[1:2], collapse = "_"))
+patient_ids_uni <- unique(patient_ids)
+colors <- hcl.colors(length(patient_ids_uni), palette = "Set3")
+patient_color_map <- setNames(colors, patient_ids_uni)
+node_colors_patient <- patient_color_map[patient_ids]
+
+# Layout with Fruchterman-Reingold to avoid label overlap
+# layout <- layout_with_fr(network)
+layout <- layout_with_fr(network, niter = 5000, grid = "nogrid")
+
+
+plot(network,
+     layout = layout, # Use Fruchterman-Reingold layout to separate nodes
+     vertex.size = 3, # Adjust vertex size
+     vertex.label.cex = 0.8,  # Adjust label size
+     vertex.label.color = "black",  # Color of labels
+     vertex.label.family = "sans",  # Font for labels
+     vertex.color = node_colors_patient,
+     main = "Sample Network Based on Confident HLA Genotype, Cutoff = 0.6,Colored by Patient ID",
+     vertex.label.dist = 0.5,  # Increase label distance to avoid overlap
+     edge.color = "black",  # Color of edges
+     edge.width = 1)      # Width of edges
+
+legend("topright",
+       legend = patient_ids_uni,
+       fill = colors,
+       title = "Patient",
+       cex = 0.8)
+
+```
+
+
+# QC: (```r paste(basename(params$site), basename(params$tissue))```) Analysis
+## QC Metric Overview {.tabset .tabset-fade}
+
+```{r subset_tissueType}
+se.subset <- se[,which(colData(se)$tissue_type == tissue)]
+se.subset <- se.subset[,which(colData(se.subset)$collection_site == site)]
+qcMetrics.subset <- select_qc_metrics(se_object = se.subset)
+
+```
+
+
+```{r qc-cutoff}
+# All cutoffs come from params$qc_cutoffs (see YAML header) so they can be
+# overridden per cohort/tissue without editing this file.
+tin_cutoff <- qc_cutoffs$tin_median
+rin_cutoff <- qc_cutoffs$rin
+threeprime_bias_cutoff <- qc_cutoffs$threeprime_bias
+gene_detected_cutoff <- qc_cutoffs$genes_detected
+exon_cv_cutoff <- qc_cutoffs$exon_cv
+rrna_rate_cutoff <- qc_cutoffs$rrna_rate
+dv200_cutoff <- qc_cutoffs$dv200
+hetero_cutoff <- qc_cutoffs$heterozygosity_mean
+somalier_cutoff <- qc_cutoffs$somalier_relatedness
+hla_cutoff <- qc_cutoffs$hla_match
+```
+
+
+### TIN vs RIN
+```{r TIN_vs_RIN}
+
+df <- as.data.frame(qcMetrics.subset)
+df$sample_id <- rownames(df)
+
+flag <- subset(df, TIN_median < tin_cutoff & RIN < rin_cutoff)
+
+ggscatter(df, x="TIN_median", y="RIN",
+          add="reg.line", conf.int=TRUE,
+          cor.coef=TRUE, cor.method="pearson",
+          xlab="Transcript Integrity Number (TIN)",
+          ylab="RNA Integrity Number (RIN)",
+          color="black", repel=FALSE) +
+  geom_text_repel(
+    data = flag,
+    aes(TIN_median, RIN, label = sample_id),
+    color = "red"
+  )
+```
+Correlation between Transcript integrity number (TIN) and RNA integrity number (RIN).
+
+
+### TIN vs Median 3 bias 
+
+```{r TIN_vs_Median_3_bias}
+
+df <- as.data.frame(qcMetrics.subset)
+df$sample_id <- rownames(df)
+
+flag <- subset(df, rnaseqc_Median.3..bias > threeprime_bias_cutoff)
+
+ggscatter(
+  df,
+  x = "TIN_median",
+  y = "rnaseqc_Median.3..bias",
+  add = "reg.line", conf.int = TRUE,
+  cor.coef = TRUE, cor.method = "pearson",
+  xlab = "Transcript Integrity Number (TIN)",
+  ylab = "Median 3' Bias",
+  repel = TRUE
+) +
+  geom_text_repel(
+    data = flag,
+    aes(x = TIN_median, y = rnaseqc_Median.3..bias, label = sample_id),
+    color = "red"
+  )
+
+```
+
+Correlation between Transcript integrity number (TIN) and Median 3 bias.
+
+
+### Genes Detected vs Median Exon CV 
+
+```{r Genes_detected_vs_Median_Exon_CV }
+df <- as.data.frame(qcMetrics.subset)
+df$sample_id <- rownames(df)
+
+flag <- subset(
+  df,
+  rnaseqc_Genes.Detected < gene_detected_cutoff |
+  rnaseqc_Median.Exon.CV > exon_cv_cutoff
+)
+
+ggscatter(
+  df,
+  x = "rnaseqc_Genes.Detected",
+  y = "rnaseqc_Median.Exon.CV",
+  color = "rnaseqc_Duplicate.Rate.of.Mapped",
+  add = "reg.line", conf.int = TRUE,
+  cor.coef = TRUE, cor.method = "pearson",
+  xlab = "Genes Detected",
+  ylab = "Median Exon CV",
+  repel = TRUE
+) +
+  geom_text_repel(
+    data = flag,
+    aes(x = rnaseqc_Genes.Detected, y = rnaseqc_Median.Exon.CV, label = sample_id),
+    color = "red"
+  )
+```
+
+Plot shows the coefficient of variation (CV) of exon coverage facilitates identification of lower-quality samples with higher variability in coverage, higher duplication rates and fewer genes detected.
+
+### RIN vs rRNA rate 
+
+```{r RIN_vs_rRNA_rate}
+
+df <- as.data.frame(qcMetrics.subset)
+df$sample_id <- rownames(df)
+
+flag <- subset(df, rnaseqc_rRNA.Rate > rrna_rate_cutoff)
+
+ggscatter(
+  df,
+  x = "RIN",
+  y = "rnaseqc_rRNA.Rate",
+  add = "reg.line", conf.int = TRUE,
+  cor.coef = TRUE, cor.method = "pearson",
+  xlab = "RNA Integrity Number (RIN)",
+  ylab = "rRNA Rate",
+  repel = TRUE
+) +
+  geom_text_repel(
+    data = flag,
+    aes(x = RIN, y = rnaseqc_rRNA.Rate, label = sample_id),
+    color = "red"
+  )
+```
+
+Correlation between RNA integrity number (RIN) and percentage of of ribosomal RNA.
+
+
+### TIN vs DV200
+
+```{r TIN_vs_DV200}
+df <- as.data.frame(qcMetrics.subset)
+df$sample_id <- rownames(df)
+
+flag <- subset(df, DV200 < dv200_cutoff)
+
+ggscatter(
+  df,
+  x = "TIN_median",
+  y = "DV200",
+  add = "reg.line", conf.int = TRUE,
+  cor.coef = TRUE, cor.method = "pearson",
+  xlab = "Transcript Integrity Number (TIN)",
+  ylab = "DV200",
+  repel = TRUE
+) +
+  geom_text_repel(
+    data = flag,
+    aes(x = TIN_median, y = DV200, label = sample_id),
+    color = "red"
+  )
+```
+
+Correlation between Transcript integrity number (TIN) and DV200.
+
+### RIN vs DV200
+```{r RIN_vs_DV200}
+df <- as.data.frame(qcMetrics.subset)
+df$sample_id <- rownames(df)
+
+# label low-quality samples (adjust or remove if not needed)
+flag <- subset(df, DV200 < dv200_cutoff)
+
+ggscatter(
+  df,
+  x = "RIN",
+  y = "DV200",
+  add = "reg.line", conf.int = TRUE,
+  cor.coef = TRUE, cor.method = "pearson",
+  xlab = "RNA integrity number (RIN)",
+  ylab = "DV200",
+  repel = TRUE
+) +
+  geom_text_repel(
+    data = flag,
+    aes(x = RIN, y = DV200, label = sample_id),
+    color = "red"
+  )
+```
+
+Correlation between RNA integrity number (RIN) and DV200.
+
+### Somalier Heterozygosity vs DV200
+```{r Somalier_heterozygosity_vs_DV200}
+
+df <- as.data.frame(qcMetrics.subset)
+df$sample_id <- rownames(df)
+
+flag <- subset(df, heterozygosity_mean > hetero_cutoff)
+
+ggscatter(
+  df,
+  x = "heterozygosity_mean",
+  y = "DV200",
+  add = "reg.line", conf.int = TRUE,
+  cor.coef = TRUE, cor.method = "pearson",
+  xlab = "Somalier Heterozygosity Mean",
+  ylab = "DV200",
+  repel = TRUE
+) +
+  geom_text_repel(
+    data = flag,
+    aes(x = heterozygosity_mean, y = DV200, label = sample_id),
+    color = "red"
+  )
+```
+
+
+
+```{r normalize_qc}
+# Normalize qc metrics for heatmap 
+normalized_qc_metrics <- function(metric_data) {
+  # Z-score normalize the quality data for plotting via heatmap
+  normalized.data <- t(scale(t(t(as.matrix(metric_data))),center=T,scale=T))
+  # Eliminate any rows that have NA after normalization
+  normalized.data<-normalized.data[which(is.na(normalized.data[,1])==FALSE),]
+  return(normalized.data)
+}
+
+normalizedQC <- normalized_qc_metrics(qcMetrics.subset)
+```
+
+### QC Metrics Heatmap 
+```{r qc_metrics_heatmap, fig.width = 22, fig.height = 14}
+#QC of interest 
+qc_to_keep <- c("rnaseqc_Total.Reads",
+                "rnaseqc_Mapped.Reads", 
+                "rnaseqc_Mapped.Unique.Reads",
+                "rnaseqc_Unique.Rate.of.Mapped",
+                "rnaseqc_High.Quality.Reads", 
+                "rnaseqc_rRNA.Reads",
+                "rnaseqc_rRNA.Rate",
+                "rnaseqc_Median.3..bias",
+                "rnaseqc_Genes.Detected",
+                "rnaseqc_Median.Exon.CV",
+                "rnaseqc_Duplicate.Rate.of.Mapped",
+                "RIN", 
+                "TIN_median", 
+                "STAR_uniquely_mapped_percent", 
+                "STAR_num_splices",
+                "STAR_unmapped_tooshort_percent",
+                "STAR_avg_mapped_read_length",
+                "STAR_uniquely_mapped",
+                "STAR_total_reads", 
+                "STAR_multimapped_multiple",
+                "STAR_multimapped_multiple_percent",
+                "DV200")
+
+#Subset QC of interest 
+normalizedQC.sub <- normalizedQC[rownames(normalizedQC) %in% qc_to_keep,]
+
+normalizedQC.sub <- t(apply(normalizedQC.sub, 1, function(x) ifelse(x > 6, 6, ifelse(x < -6, -6, x))))
+
+
+mat_col<-data.frame(sample=as.factor(colData(se.subset)$tissue_type))
+rownames(mat_col) <- colnames(se.subset)
+
+
+#Plot a heatmap of QC metrics across all samples
+heatmap.qc <- pheatmap(
+mat=normalizedQC.sub,
+col=colorRampPalette(c("blue","white","red"), space="rgb")(255),
+annotation_col = mat_col,
+clustering_method = "ward.D2",
+fontsize_row = 10,
+legend = TRUE,
+legend_breaks = c(-6,0,6),
+border_color = FALSE,
+show_colnames = TRUE)
+
+heatmap.qc
+```
+
+
+## QC Based on Expression Count {.tabset .tabset-fade}
+
+```{r qc_gene_expression}
+# ------------------------------------
+# 1. Expression Count Preprocessing
+# ------------------------------------
+
+# Create a DGE object from expression counts in SummarizedExperiment
+data.dge <- c()
+data.dge <- DGEList(counts = assays(se.subset)$expected_count)
+
+# Normalize library sizes using TMM method
+data.dge <- calcNormFactors(data.dge, method = "TMM")
+
+# Compute log-CPM values
+data.cpm <- cpm(data.dge, log = TRUE)
+
+# ------------------------------------
+# 2. Filter Out Lowly Expressed Genes
+# ------------------------------------
+
+# Identify lowly expressed genes based on variance and expression levels
+test1 <- apply(data.cpm, 1, IQR)  # Interquartile range (variance)
+test2 <- apply(data.cpm, 1, sum)  # Sum of CPM values
+low.genes <- union(which(test1 == 0), which(test2 <= 1))  # Zero variance or CPM < 1
+gene.ind <- setdiff(1:nrow(data.cpm), low.genes)  # Retain expressed genes
+
+# Recompute normalization on filtered genes
+data.dge2 <- data.dge[gene.ind, , keep.lib.sizes = FALSE]
+data.dge2 <- calcNormFactors(data.dge2, method = "TMM")
+data.cpm2 <- cpm(data.dge2, log = TRUE)
+
+# Z-score normalization for heatmap
+# The scale() function will always scale by column, only (you can get it to scale by row by doing t(scale(t(x)))); so, each column in the data is scaled separately.
+z.data <- t(scale(t(data.cpm2), center = TRUE, scale = TRUE))
+```
+
+
+### Sample-Sample correlaton heatmap with RIN values
+
+```{r}
+#Plots sample correlation heatmaps
+sampleMatrix <- cor(data.cpm2)
+gene.cor.tally <- matrix(ncol = nrow(sampleMatrix), data = 0)
+colnames(gene.cor.tally) <- rownames(sampleMatrix)
+
+gene.cor.tally2 <- matrix(
+  ncol = nrow(sampleMatrix),
+  nrow = ncol(sampleMatrix),
+  data = 0)
+rownames(gene.cor.tally2) <- colnames(sampleMatrix)
+colnames(gene.cor.tally2) <- rownames(sampleMatrix)
+
+isNum <- 0
+for (i in 1:ncol(sampleMatrix)){
+  qc <- sampleMatrix[,i]
+  isNum <- isNum + 1
+    mean.qc <- mean(qc)
+    sd.qc <- sd(qc)
+    # Identify samples ±2 SD from mean correlation
+    outlier_samples <- which(qc > mean.qc + 2 * sd.qc | qc < mean.qc - 2 * sd.qc)
+    gene.cor.tally[,outlier_samples] <- gene.cor.tally[,outlier_samples] + 1
+    
+    gene.cor.tally2[i,outlier_samples] <- gene.cor.tally2[i, outlier_samples] + 1
+}
+# samples that are +/- 2sd away from the mean sample to sample correlation 
+colnames(gene.cor.tally)[gene.cor.tally > 10]
+```
+
+Outliers are defined as +/- 2sd away from the mean sample to sample correlation of all genes
+
+This plot shows hierarchically clustering of pearson correlation of log cpm transformed expression data. 
+```{r, Sample_sample_correlation_heatmap_RIN, fig.width = 22, fig.height = 14}
+rownames(sampleMatrix) <- paste(colnames(se.subset),colData(se.subset)$RIN, sep="-")
+colnames(sampleMatrix) <- colnames(se.subset) #paste(colnames(se),colData(se)$tissue_type, sep="-")
+colors <- colorRampPalette(c("blue", "white", "red"))(255)
+
+# Create annotation dataframe for RIN values
+annotation_rin <- data.frame(RIN = qcMetrics.subset$RIN)
+rownames(annotation_rin) <- rownames(qcMetrics.subset)
+
+# Heatmap with RIN annotation
+pheatmap(sampleMatrix,
+         fontsize = 8,
+         color = colors,
+         annotation_col = annotation_rin,
+         clustering_method = "ward.D2",
+         border_color = FALSE,
+         show_colnames = TRUE,
+         main = "Sample Correlation Heatmap (RIN Median Annotated)")
+```
+
+### Sample-Sample correlaton heatmap with TIN values
+
+```{r, Sample_sample_correlation_heatmap_TIN, fig.width = 22, fig.height = 14}
+rownames(sampleMatrix) <- paste(colnames(se.subset),round(colData(se.subset)$TIN_median,3), sep="-")
+colnames(sampleMatrix) <- colnames(se.subset)#paste(colnames(se),colData(se)$tissue_type, sep="-")
+
+# Create annotation dataframe for RIN values
+annotation_tin <- data.frame(TIN = qcMetrics.subset$TIN_median)
+rownames(annotation_tin) <- rownames(qcMetrics.subset)
+
+# Heatmap with RIN annotation
+pheatmap(sampleMatrix,
+         fontsize = 8,
+         color = colors,
+         annotation_col = annotation_tin,
+         clustering_method = "ward.D2",
+         border_color = FALSE,
+         show_colnames = TRUE,
+         main = "Sample Correlation Heatmap (TIN Median Annotated)")
+```
+
+Similar pattern is observed as above, 
+### Outlier sample names based on PCA
+
+```{r compute_outliers}
+#Conduct a PCA analysis and plot PC1 versus PC2
+pca <- prcomp(z.data,scale=F, center=F)
+mean.pc1 <- mean(pca$rotation[,1])
+sd.pc1 <- sd(pca$rotation[,1])
+mean.pc2 <- mean(pca$rotation[,2])
+sd.pc2 <- sd(pca$rotation[,2])
+outliers <- c(which(pca$rotation[,1]<(mean.pc1-sd.pc1*2)),
+              which(pca$rotation[,1]>(mean.pc1+sd.pc1*2)),
+              which(pca$rotation[,2]<(mean.pc2-sd.pc2*2)),
+              which(pca$rotation[,2]>(mean.pc2+sd.pc2*2)))
+out.color <- rep("no", length(colData(se.subset)$sample_id))
+out.color[outliers] <- "yes"
+perc.var <- (pca$sdev)^2/sum(pca$sdev^2)
+percentVar <- round(100 * perc.var)
+# sample name of outliers 
+colData(se.subset)$sample_id[which(out.color == "yes")]
+```
+Outlier samples defined +/- 2sd away from the mean PC1 ad mean PC2
+
+### PCA plot colored by TIN
+
+```{r, EdgeR_pca_TIN_median,fig.width = 11, fig.height = 8}
+#ggplot(as.data.frame(pca$rotation[,c(1,2)]), aes(PC1,PC2, color=colData(se)$TIN_median, shape=colData(se)$tissue_type)) +
+sample_id <- rownames(pca$rotation)
+plot2 <- ggplot(as.data.frame(pca$rotation[,c(1,2)]), 
+                aes(PC1,PC2,color=colData(se.subset)$TIN_median,label = sample_id)) +
+  geom_point(size=3,aes(shape=colData(se.subset)$collection_site)) +
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance"))
+#plot2
+ggplotly(plot2)
+```
+
+
+The PCA plot shows the first two principal components of the log cpm transformed expression data 
+TIN values illustrates for the variation that is observed and shape indicates where samples originate. 
+
+### PCA plot colored by RIN 
+
+```{r, EdgeR_pca_RIN, fig.width = 11, fig.height = 8}
+#ggplot(as.data.frame(pca$rotation[,c(1,2)]),aes(PC1,PC2, color=colData(se)$RIN, shape=colData(se)$tissue_type)) +
+plot3 <- ggplot(as.data.frame(pca$rotation[,c(1,2)]),
+                aes(PC1,PC2, color=as.numeric(colData(se.subset)$RIN),label = sample_id)) +
+  geom_point(size=3, aes(shape=colData(se.subset)$collection_site)) +
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance"))
+#plot3
+ggplotly(plot3)
+```
+
+
+The PCA plot shows the first two principal components of the log cpm transformed expression data 
+RIN values illustrates for the variation that is observed and shape indicates where samples originate. 
+
+### PCA plot colored by outliers 
+
+```{r, EdgeR_pca_outliers, fig.width = 10, fig.height = 8}
+#ggplot(as.data.frame(pca$rotation[,c(1,2)]), aes(PC1,PC2, color=out.color, shape=colData(se)$tissue_type)) +
+plot4 <- ggplot(as.data.frame(pca$rotation[,c(1,2)]), 
+                aes(PC1,PC2, shape=colData(se.subset)$collection_site, label = sample_id)) +
+  geom_point(size=4, aes(color = out.color)) +
+  ggplot2::theme_bw() +
+  ggplot2::theme(
+    panel.grid.major = ggplot2::element_blank(),
+    panel.grid.minor = ggplot2::element_blank(),
+    axis.text = ggplot2::element_text(size = 14),
+    axis.title = ggplot2::element_text(size = 14)
+  ) +
+  ggplot2::xlab(paste0("PC1 (", percentVar[1], "%)")) +
+  ggplot2::ylab(paste0("PC2 (", percentVar[2], "%)")) +
+  ggplot2::theme(legend.title = ggplot2::element_text(size = 15), legend.text = ggplot2::element_text(size = 13)) +
+  ggplot2::guides(colour = ggplot2::guide_legend(override.aes = list(size = 2))) +
+  labs(color='Outliers',shape= "Site")+
+  ggplot2::scale_color_manual(name = "Outliers",
+                     values = c("firebrick", "blue"),
+                     labels = c("no", "yes"))
+  #labs(color='Outliers',shape= "Site") 
+  
+
+ggplotly(plot4)
+
+```
+
+The PCA plot shows the first two principal components of the log cpm transformed expression data 
+Color illustrates if samples are outliers based on -+2 standard deviation away from the mean and shape indicates where samples originate. 
+
+## Batch information {.tabset .tabset-fade}
+### PCA batch  
+color PCA plot by batch and see if you observe visual separation of the samples 
+```{r, pca_batch, fig.width = 10, fig.height = 8}
+batch.sub <- as.factor(colData(se.subset)$batch_id)
+nb <- length(unique(batch.sub))
+mycolors <- colorRampPalette(brewer.pal(12, "Paired"))(nb)
+myCol <- setNames(mycolors,unique(batch.sub))
+
+pca.before <- prcomp(z.data,scale=F, center=F)
+
+perc.var <- (pca.before$sdev)^2/sum(pca.before$sdev^2)
+percentVar <- round(100 * perc.var)
+sampleID <- rownames(pca.before$rotation)
+batch.plot <- ggplot(as.data.frame(pca.before$rotation[,c(1,2)]), 
+                     aes(PC1,PC2, color=batch.sub, shape=colData(se.subset)$tissue_type,label=sampleID)) +
+  geom_point(size=3) +
+  labs(#title = "Before batch effect correction",
+       x = paste0("PC1: ",percentVar[1],"% variance"),
+       y = paste0("PC2: ",percentVar[2],"% variance")) +
+   scale_shape_manual(name = "Sample Type",
+                       values = 16,
+                      labels =  tissue) +
+  scale_color_manual(name = tissue,
+                     #values = COLORS
+                     values = myCol)+
+  theme_classic() +
+  theme(text = element_text(size = 14)) 
+
+
+ggplotly(batch.plot)
+```
+
+## QC Tally and Number of Outliers Binned {.tabset .tabset-fade}
+
+### QC histogram outliers 
+
+```{r, histo_tally_outliers}
+# ------------------------------------
+# 1. Remove QC Metrics with Constant Values
+# ------------------------------------
+
+# Identify columns with the same values across all samples
+rm.ix.qc <- c()
+for (i in 1:ncol(qcMetrics.subset)) {
+  if (length(unique(qcMetrics.subset[,i]))== 1) {
+    rm.ix.qc <- c(rm.ix.qc, i)
+  }
+}
+# Filter dataset to remove constant QC metrics
+qc.metrics.unique.col <- qcMetrics.subset[-rm.ix.qc]
+
+# ------------------------------------
+# 2. Identify Outliers in QC Metrics
+# ------------------------------------
+
+# Initialize matrices for tallying outliers
+qc.tally <- matrix(ncol = nrow(qc.metrics.unique.col), data = 0)
+colnames(qc.tally) <- rownames(qc.metrics.unique.col)
+
+qc.tally2 <- matrix(
+  ncol = nrow(qc.metrics.unique.col),
+  nrow = ncol(qc.metrics.unique.col),
+  data = 0)
+rownames(qc.tally2) <- colnames(qc.metrics.unique.col)
+colnames(qc.tally2) <- rownames(qc.metrics.unique.col)
+
+isNum <- 0
+# Loop through each QC metric column
+for (i in 1:ncol(qc.metrics.unique.col)){
+  qc <- qc.metrics.unique.col[,i]
+  if (class(qc) == "numeric" | class(qc) == "integer") {
+    isNum <- isNum + 1
+    mean.qc <- mean(qc)
+    sd.qc <- sd(qc)
+    # Identify samples ±2 SD from mean correlation
+    outlier_samples <- which(qc > mean.qc + 2 * sd.qc | qc < mean.qc - 2 * sd.qc)
+    # Increment tally matrices
+    qc.tally[,outlier_samples] <- qc.tally[,outlier_samples] + 1
+    qc.tally2[i, outlier_samples] <- qc.tally2[i, outlier_samples] + 1
+  }
+}
+# ------------------------------------
+# 3. Prepare Data for Histogram Plot
+# ------------------------------------
+
+# Convert tally matrix into a data frame
+qc.tally.gg <- as.data.frame(t(qc.tally))
+# Create a column to indicate outlier binning
+qc.tally.gg$Number_Outliers_Binned <- qc.tally.gg$V1 > 6
+qc.tally.gg$FillColor <- sapply(qc.tally.gg$Number_Outliers_Binned, function(x) {
+  if(x == TRUE) {
+    return("Above 6 Outliers")
+  } else{
+    return("Below 6 Outliers")
+  }
+})
+# ------------------------------------
+# 4. Plot Histogram of Outlier Tally
+# ------------------------------------
+histQC <- ggplot(data = qc.tally.gg, aes(x = V1, fill = FillColor, color = FillColor)) +
+  geom_histogram() +
+  labs(x = "Tally of outliers") +
+  ggplot2::theme_bw() +
+  ggplot2::theme(
+    panel.grid.major = ggplot2::element_blank(),
+    panel.grid.minor = ggplot2::element_blank(),
+    axis.text = ggplot2::element_text(size = 15),
+    axis.title = ggplot2::element_text(size = 15),
+    legend.title = element_blank()
+  )
+
+histQC
+#ggplotly(histQC)
+```
+
+The plot indicates tally of QC metrics for each sample. It shows a separation where number of outliers are binned as below 6 (green) or above 6 (red).  
+
+
+```{r}
+qc.tally.gg$Number_Outliers_Binned <- as.character(qc.tally.gg$Number_Outliers_Binned)
+qc.tally.gg$Number_Outliers_Binned <- gsub("FALSE", "x < 6", qc.tally.gg$Number_Outliers_Binned)
+qc.tally.gg$Number_Outliers_Binned <- gsub("TRUE", "x => 6", qc.tally.gg$Number_Outliers_Binned)
+
+highAmountOutlier <- colnames(qc.tally)[which(qc.tally > 6)]
+
+qualAnnot <- sapply(qc.tally, function(x){
+  if ( x < 6){
+    return("x =< 6")
+  }else if (x < 40){
+    return("6 < x < 20")
+  }else {
+    return("x >= 20")
+  }
+})
+
+Number_Outliers_Binned <- as.factor(qualAnnot)
+Number_Outliers_Binned <- factor(Number_Outliers_Binned, 
+                                 levels = c("x =< 6", 
+                                            "6 < x < 20", 
+                                            "x >= 20"))
+```
+
+
+A total of `r isNum` QC metrics were taken into consideration. The following samples had a high number of QC metrics outliers (more than 6): `r highAmountOutlier`. These are colored as red on the histogram.
+
+
+### Correlaton of uniquely mapped percent  
+
+```{r, uniquely_mapped_percent}
+qc.df2 <- as_tibble(qcMetrics.subset@listData)
+qc.df2$Number_Outliers_Binned <- Number_Outliers_Binned
+ggscatter(qc.df2, x = "STAR_uniquely_mapped_percent", y = "rnaseqc_Unique.Rate.of.Mapped", color = "Number_Outliers_Binned",
+          cor.coef = TRUE, cor.method = "pearson",
+          xlab = "STAR uniquely mapped percent", ylab = "RNASeQC unique percent")
+```
+
+Correlation between RSeQC unique mapped percent and STAR uniquely mapped pecent  colored by number of outliers binned.
+
+
+### Correlaton of RIN vs TIN 
+
+```{r, RIN_vs_TIN_median}
+ggscatter(qc.df2, x = "RIN", y = "TIN_median", color = "Number_Outliers_Binned",
+          cor.coef = TRUE, cor.method = "pearson",
+          xlab = "RNA integrity number (RIN)", ylab = "Transcript integrity number (TIN")
+```
+
+Correlation between Transcript integrity number (TIN) and RNA integrity number (RIN) colored by number of outliers binned.
+ 
+
+### Correlation uniquelly mapped percent vs genes detected 
+
+```{r, uniquely_mapped_percent_vs_gene_detected}
+qc.df2$Genes_detected <- colSums(assay(se.subset) > 0)
+ggscatter(qc.df2, x = "STAR_uniquely_mapped_percent", y = "Genes_detected", color = "Number_Outliers_Binned",
+          cor.coef = TRUE, cor.method = "pearson",
+          xlab = "STAR uniquely mapped percent", ylab = "Genes detected")
+```
+
+Correlation between Genes detected and STAR uniquely mapped percent colored by number of outliers binned.
+Number of QC oultier binned facilities the identification of low quality samples possible duplicates as seen with two samples colored blue with high genes detected and low uniquely mapped percent.  
+
+### PCA of QC metrics  
+
+```{r, pca_qc_metrics, fig.width = 12, fig.height = 8}
+#z-score scale and removing "SAMPLE_ID" column ( non-numeric) from qc.metrics 
+qcMetrics.z <- t(scale(qcMetrics.subset))
+#qcMetrics.z <- t(scale(qc.metrics))
+# Eliminate any rows that have NA after normalization
+qcMetrics.z <- qcMetrics.z[which(rowSums(qcMetrics.z) != "NaN"),]
+qcMetrics.z.trim <- qcMetrics.z
+
+qcMetrics.z.trim[qcMetrics.z < -2] <- -2
+qcMetrics.z.trim[qcMetrics.z > 2] <- 2
+
+Number_Outliers_Binned <- as.factor(qualAnnot)
+Number_Outliers_Binned <- factor(Number_Outliers_Binned, 
+                                 levels = c("x =< 6",
+                                            "6 < x < 20",
+                                            "x >= 20"))
+
+z <- qcMetrics.z
+
+#Run PCA
+pc <- prcomp(z, center = F, scale=F)
+
+pcabothtype <- as.data.frame(pc$rotation[,1:3])
+pcabothtype$Number_Outliers_Binned <- Number_Outliers_Binned
+
+spc <- summary(pc)
+
+pc1Importance <- signif(spc$importance[2, 1] * 100, 3)
+pc2Importance <- signif(spc$importance[2, 2] * 100, 3)
+sampleID <- rownames(pcabothtype)
+plotpca <- ggplot(pcabothtype, 
+                  aes(x= PC1, y = PC2, color=as.numeric(colData(se.subset)$RIN),label = sampleID)) +
+  geom_point(size=5, aes(shape=Number_Outliers_Binned))+
+  ggplot2::theme_bw() +
+  ggplot2::theme(
+    panel.grid.major = ggplot2::element_blank(),
+    panel.grid.minor = ggplot2::element_blank(),
+    axis.text = ggplot2::element_text(size = 14),
+    axis.title = ggplot2::element_text(size = 14)
+  ) +
+  ggplot2::xlab(paste0("PC1 (", pc1Importance, "%)")) +
+  ggplot2::ylab(paste0("PC2 (", pc2Importance, "%)")) +
+  ggplot2::theme(legend.title = ggplot2::element_text(size = 15), legend.text = ggplot2::element_text(size = 13)) #+
+  #ggplot2::guides(colour = ggplot2::guide_legend(override.aes = list(size = 2)))
+#plotpca
+ggplotly(plotpca)
+```
+
+Top two principal components (PCs) of z-score scaled QC metrics. Shape illustrates number of outliers binned and color shows range of RIN values. 
+
+### QC metrics association to PC components 1: 10
+
+```{r}
+cor1 <- cor(pc$rotation[,1:10], t(qcMetrics.z), method = "pearson")
+
+cor1Res <- apply(cor1, 2, function(x){
+  return(names(which.max(abs(x))))
+})
+
+uniquePCs <- unique(cor1Res)[order(unique(cor1Res))]
+qcpc.list = list()
+for(x in 1:length(uniquePCs)){
+  pc.num <- uniquePCs[x]
+  qcpc.list[[pc.num]] = names(cor1Res)[cor1Res == pc.num]
+}
+
+QCPC.table <- plyr::ldply(qcpc.list, cbind)
+colnames(QCPC.table) <- c("PC", "Metric")
+
+ QCPC.table %>%
+   knitr::kable(
+     format = "html", align = rep("c", ncol(QCPC.table) + 1),
+     row.names = TRUE
+   ) %>%
+   kableExtra::kable_styling() %>%
+   kableExtra::scroll_box(height = "200px")
+
+```
+
+
+Of all of the QC metrics, 60 were most associated, either positively or negatively, to PC1. 
+
+
+### Heatmap QC outliers
+
+The numeric QC metric values were z-scored across samples, plotted by heatmap. A total of `r isNum` were used. 
+
+```{r, heatmap_qc_outiers, fig.width = 22, fig.height = 14}
+Number_Outliers_Binned <- as.factor(qualAnnot)
+Number_Outliers_Binned <- factor(Number_Outliers_Binned, 
+                                 levels = c("x =< 6",
+                                            "6 < x < 20",
+                                            "x >= 20"))
+
+annotation_col <- data.frame(Number_Outliers_Binned)
+
+rownames(annotation_col) <- colnames(qcMetrics.z.trim)
+
+annotation_row <- data.frame(Correlated_PC = cor1Res)
+rownames(annotation_row) <- rownames(qcMetrics.z.trim)
+
+
+out <- pheatmap::pheatmap(qcMetrics.z.trim,
+  #color = colorRampPalette(rev(brewer.pal(n = 7, name = "RdYlBu")))(100),
+  color = colorRampPalette(c("blue","white","red"), space="rgb")(255),
+  annotation_col = annotation_col,
+  annotation_row = annotation_row,
+  legend = T,
+  show_rownames = T,
+  show_colnames = T,
+  fontsize_row = 7,
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  clustering_method = "ward.D2"
+)
+out
+```
+
+ 
+
+## Using cutree to assign clusters to samples {.tabset .tabset-fade}
+The `cutree` function is used to cut the dendrogram into clusters. Users may define a specific cluster as those with poor quality samples.
+
+### K = 2
+
+```{r}
+##Uses cutree to determine which samples to remove
+
+clusterLabels <- as.data.frame(sort(cutree(out$tree_col, k=2)))
+colnames(clusterLabels) <- "Cluster"
+clusterLabels %>%
+  knitr::kable(
+    format = "html", align = rep("c", ncol(QCPC.table) + 1),
+    row.names = TRUE
+  ) %>%
+  kableExtra::kable_styling() %>%
+  kableExtra::scroll_box(height = "250px")
+
+#  if(output){
+#     write.table(clusterLabels, "cutreeClusterLabels_K2.txt", sep = "\t", quote = F)
+# }
+```
+
+
+
+### K = 3
+
+```{r}
+
+clusterLabels <- as.data.frame(sort(cutree(out$tree_col, k=3)))
+colnames(clusterLabels) <- "Cluster"
+clusterLabels %>%
+  knitr::kable(
+    format = "html", align = rep("c", ncol(QCPC.table) + 1),
+    row.names = TRUE
+  ) %>%
+  kableExtra::kable_styling() %>%
+  kableExtra::scroll_box(height = "250px")
+
+# if(output){
+#     write.table(clusterLabels, "cutreeClusterLabels_K3.txt", sep = "\t", quote = F)
+# }
+```
+
+
+### K = 4
+
+```{r}
+
+clusterLabels <- as.data.frame(sort(cutree(out$tree_col, k=4)))
+colnames(clusterLabels) <- "Cluster"
+clusterLabels %>%
+  knitr::kable(
+    format = "html", align = rep("c", ncol(QCPC.table) + 1),
+    row.names = TRUE
+  ) %>%
+  kableExtra::kable_styling() %>%
+  kableExtra::scroll_box(height = "250px")
+
+# if(output){
+#     write.table(clusterLabels, "cutreeClusterLabels_K4.txt", sep = "\t", quote = F)
+# }
+```
+
+
+### K = 5
+
+```{r}
+
+clusterLabels <- as.data.frame(sort(cutree(out$tree_col, k=5)))
+colnames(clusterLabels) <- "Cluster"
+clusterLabels %>%
+  knitr::kable(
+    format = "html", align = rep("c", ncol(QCPC.table) + 1),
+    row.names = TRUE
+  ) %>%
+  kableExtra::kable_styling() %>%
+  kableExtra::scroll_box(height = "250px")
+
+# if(output){
+#     write.table(clusterLabels, "cutreeClusterLabels_K5.txt", sep = "\t", quote = F)
+# }
+```
+
+
+
+
+## QC based sex annotation (based on X and Y-linked genes) {.tabset .tabset-fade}
+
+### Heatmap sex genes 
+
+```{r, heatmap_sex_genes, fig.width = 18, fig.height = 10}
+# -----------------------------
+# 0. Build sex-gene matrix
+# -----------------------------
+control.symbols <- c("XIST", "TXLNGY", "DDX3Y", "KDM5D", "RPS4Y1", "USP9Y", "UTY")
+
+# expression for biopsy subset only
+data.dge.sex <- as.matrix(data.cpm)
+mode(data.dge.sex) <- "numeric"
+
+gene_symbols <- as.character(mcols(se.subset)$external_gene_name)
+
+sex.df <- data.frame(
+  external_gene_name = gene_symbols,
+  data.dge.sex,
+  check.names = FALSE,
+  stringsAsFactors = FALSE
+)
+
+sex.genes.df <- sex.df %>%
+  filter(external_gene_name %in% control.symbols)
+
+sex.expr <- as.matrix(sex.genes.df[, setdiff(colnames(sex.genes.df), "external_gene_name"), drop = FALSE])
+mode(sex.expr) <- "numeric"
+rownames(sex.expr) <- sex.genes.df$external_gene_name
+
+# collapse duplicate symbols if present
+if (any(duplicated(rownames(sex.expr)))) {
+  sex.expr <- rowsum(sex.expr, group = rownames(sex.expr), na.rm = TRUE) /
+    as.vector(table(rownames(sex.expr)))
+}
+
+# keep only genes present
+keep_genes <- intersect(control.symbols, rownames(sex.expr))
+sex.expr <- sex.expr[keep_genes, , drop = FALSE]
+
+# remove all-NA rows
+sex.expr <- sex.expr[rowSums(is.na(sex.expr)) < ncol(sex.expr), , drop = FALSE]
+
+# impute remaining NAs gene-wise by median
+if (nrow(sex.expr) > 0) {
+  for (i in seq_len(nrow(sex.expr))) {
+    na_idx <- is.na(sex.expr[i, ])
+    if (any(na_idx)) {
+      sex.expr[i, na_idx] <- median(sex.expr[i, ], na.rm = TRUE)
+    }
+  }
+}
+
+
+sex.expr.z<-t(scale(t(sex.expr),center=T,scale=T))
+# BUG FIX from the original script: this used to hardcode
+# `c(rep("Male", 6), "Female")`, i.e. it assumed exactly 6 Y-linked genes were
+# present, in a fixed order, followed by XIST -- silently mislabeling rows
+# whenever a marker gene was absent from the SE (a real risk on any dataset
+# other than the original one). Build the row-level marker-type annotation
+# from the actual surviving gene rownames instead.
+marker_type <- ifelse(rownames(sex.expr.z) %in% "XIST", "X-linked (XIST)", "Y-linked")
+annot_row <- data.frame(marker_type = factor(marker_type, levels = c("Y-linked", "X-linked (XIST)")))
+rownames(annot_row) <- rownames(sex.expr.z)
+sex.expr.z <- t(apply(sex.expr.z, 1, function(x) ifelse(x > 1, 1, ifelse(x < -1, -1, x))))
+#sex.genes.trim.nums.z <- t(apply(sex.genes.trim.nums.z, 1, function(x) ifelse(x > 1, 1, ifelse(x < -1, -1, x))))
+sex_colors <- list(marker_type = c("Y-linked" = "lightgreen", "X-linked (XIST)" = "purple"))
+heatmap.sex <- pheatmap(
+  sex.expr.z,
+ color = colorRampPalette(c("blue","white","red"), space="rgb")(255),
+ annotation_row = annot_row,
+ annotation_colors = sex_colors,
+ legend = T,
+ fontsize = 10,
+ show_rownames = T,
+ show_colnames = T,
+ fontsize_row = 7,
+ cluster_rows = TRUE,
+ cluster_cols = TRUE,
+ clustering_method = "ward.D2"
+)
+heatmap.sex
+```
+
+Heatmap shows sex gene expression for all samples.
+
+### PCA of sex-marker genes 
+```{r sex_genes_pca, fig.width = 18, fig.height = 10}
+
+# -----------------------------
+# 1. PCA on samples
+# -----------------------------
+pca_sex <- prcomp(t(sex.expr), center = TRUE, scale. = TRUE)
+
+y_present <- intersect(c("TXLNGY", "DDX3Y", "KDM5D", "RPS4Y1", "USP9Y", "UTY"), rownames(sex.expr))
+x_present <- intersect(c("XIST", "Xist"), rownames(sex.expr))
+
+qc.sex <- data.frame(
+  sample = colnames(sex.expr),
+  sex_PC1 = pca_sex$x[, 1],
+  sex_PC2 = pca_sex$x[, 2],
+  XIST = if (length(x_present) > 0) as.numeric(sex.expr[x_present[1], ]) else NA_real_,
+  Y_mean = if (length(y_present) > 0) colMeans(sex.expr[y_present, , drop = FALSE], na.rm = TRUE) else NA_real_,
+  stringsAsFactors = FALSE
+)
+
+# -----------------------------
+# 2. Infer sex from PC1 by kmeans
+# -----------------------------
+set.seed(1)
+km <- kmeans(qc.sex$sex_PC1, centers = 2, nstart = 50)
+
+qc.sex$cluster <- factor(km$cluster)
+
+cluster_summary <- qc.sex %>%
+  group_by(cluster) %>%
+  summarise(
+    med_XIST = median(XIST, na.rm = TRUE),
+    med_Y = median(Y_mean, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+female_cluster <- cluster_summary$cluster[which.max(cluster_summary$med_XIST)]
+male_cluster   <- cluster_summary$cluster[which.max(cluster_summary$med_Y)]
+
+qc.sex <- qc.sex %>%
+  mutate(
+    inferred_sex = case_when(
+      cluster == female_cluster ~ "Female",
+      cluster == male_cluster ~ "Male",
+      TRUE ~ "Unknown"
+    )
+  )
+
+# -----------------------------
+# 3. Confidence / outlier metrics
+# -----------------------------
+sex_medians <- tapply(qc.sex$sex_PC1, qc.sex$inferred_sex, median, na.rm = TRUE)
+sex_medians <- sex_medians[names(sex_medians) %in% c("Female", "Male")]
+
+boundary <- mean(sex_medians)
+qc.sex$boundary_dist <- abs(qc.sex$sex_PC1 - boundary)
+
+qc.sex$mdist <- NA_real_
+
+for (sx in unique(qc.sex$inferred_sex)) {
+  idx <- which(qc.sex$inferred_sex == sx)
+  if (length(idx) >= 3) {
+    coords <- qc.sex[idx, c("sex_PC1", "sex_PC2"), drop = FALSE]
+    center <- colMeans(coords)
+    covmat <- cov(coords)
+
+    if (all(is.finite(covmat)) && det(as.matrix(covmat)) != 0) {
+      qc.sex$mdist[idx] <- mahalanobis(coords, center = center, cov = covmat)
+    }
+  }
+}
+
+pc1_margin_thresh <- quantile(qc.sex$boundary_dist, 0.10, na.rm = TRUE)
+mdist_thresh <- quantile(qc.sex$mdist, 0.95, na.rm = TRUE)
+
+qc.sex <- qc.sex %>%
+  mutate(
+    flag_sex_near_boundary = boundary_dist <= pc1_margin_thresh,
+    flag_sex_within_group_outlier = mdist >= mdist_thresh,
+    flag_sex_QC_PC_outlier = flag_sex_near_boundary | flag_sex_within_group_outlier,
+    sex_qc_flag = case_when(
+      flag_sex_near_boundary & flag_sex_within_group_outlier ~ "Ambiguous + outlier",
+      flag_sex_near_boundary ~ "Near boundary",
+      flag_sex_within_group_outlier ~ "Within-sex outlier",
+      TRUE ~ "Pass"
+    )
+  )
+
+# optional plot
+ggplot(qc.sex, aes(sex_PC1, sex_PC2, color = inferred_sex, shape = sex_qc_flag)) +
+  geom_point(size = 3, alpha = 0.9) +
+  ggrepel::geom_text_repel(
+    aes(label = ifelse(sex_qc_flag != "Pass", sample, "")),
+    size = 3,
+    max.overlaps = 50
+  ) +
+  theme_bw(base_size = 12) +
+  labs(
+    title = "Sex QC by PCA of sex-marker genes",
+    subtitle = "Flagged samples are near the sex boundary or outliers within their inferred sex group",
+    x = "Sex PC1",
+    y = "Sex PC2"
+  )
+
+```
+
+
+## Flagged QC samples {.tabset .tabset-fade}
+
+### Flagged samples table
+
+```{r flagged_qc_per-sample_tally_table}
+# Pick the sample universe for this tissue subset
+samples <- colnames(se.subset)
+## Table 
+qc_tbl <- tibble(
+  sample_id  = samples,
+  patient_id = colData(se.subset)$patient_id %>% as.character()
+)
+
+# Flag #1: Somalier cross-patient connections (relatedness >= cutoff)
+som_edges <- somalier_pairs %>%
+  transmute(a = X.sample_a, b = sample_b, rel = relatedness) %>%
+  filter(!is.na(rel), rel >= somalier_cutoff) %>%
+  filter(a %in% samples, b %in% samples)
+
+pid <- setNames(qc_tbl$patient_id, qc_tbl$sample_id)
+cross_som <- pid[som_edges$a] != pid[som_edges$b]
+
+som_flag_samples <- unique(c(som_edges$a[cross_som], som_edges$b[cross_som]))
+
+qc_tbl <- qc_tbl %>%
+  mutate(flag_somalier_cross_patient = sample_id %in% som_flag_samples)
+# mismatch
+som_flag_pairs <- som_edges[cross_som, ] %>%
+  mutate(pid_a = pid[a], pid_b = pid[b])
+
+# Flag #2: HLA genotype cross-patient connections (>= cutoff)
+hla_edges <- geno.all.pairs %>%
+  transmute(a = sample_a, b = sample_b, rel = percentOFcomparison) %>%
+  filter(!is.na(rel), rel >= hla_cutoff) %>%
+  filter(a %in% samples, b %in% samples)
+
+cross_hla <- pid[hla_edges$a] != pid[hla_edges$b]
+hla_flag_samples <- unique(c(hla_edges$a[cross_hla], hla_edges$b[cross_hla]))
+
+qc_tbl <- qc_tbl %>%
+  mutate(flag_hla_cross_patient = sample_id %in% hla_flag_samples)
+
+df_qc <- as.data.frame(qcMetrics.subset)
+
+df_qc$sample_id <- rownames(df_qc)
+
+
+qc_tbl <- qc_tbl[qc_tbl$sample_id %in% df_qc$sample_id,]
+# join QC columns into qc_tbl
+qc_tbl <- qc_tbl %>%
+  left_join(df_qc, by = "sample_id")
+
+
+qc_tbl <- qc_tbl %>%
+  mutate(
+    flag_low_tin_rin = (TIN_median < tin_cutoff & RIN < rin_cutoff),
+    flag_3prime_bias = (rnaseqc_Median.3..bias > threeprime_bias_cutoff),
+    flag_low_genes_or_high_exon_cv = (rnaseqc_Genes.Detected < gene_detected_cutoff |
+                                        rnaseqc_Median.Exon.CV > exon_cv_cutoff),
+    flag_high_rrna = (rnaseqc_rRNA.Rate > rrna_rate_cutoff),
+    flag_low_dv200 = (DV200 < dv200_cutoff),
+    flag_high_hetero = (heterozygosity_mean > hetero_cutoff)
+  )
+
+# Flag #4: Expression QC (sample-sample corr outliers + PCA outliers)
+# you already computed: colnames(gene.cor.tally)[gene.cor.tally > 10]
+expr_corr_outliers <- colnames(gene.cor.tally)[gene.cor.tally > 10]
+
+qc_tbl <- qc_tbl %>%
+  mutate(flag_expr_corr_outlier = sample_id %in% expr_corr_outliers)
+
+## Expression PCA outliers
+expr_pca_outliers <- colData(se.subset)$sample_id[which(out.color == "yes")]
+
+qc_tbl <- qc_tbl %>%
+  mutate(flag_expr_pca_outlier = sample_id %in% expr_pca_outliers)
+
+# Flag #5: QC histogram outliers
+highAmountOutlier <- colnames(qc.tally)[which(qc.tally > 6)]
+qc_tbl <- qc_tbl %>%
+  mutate(flag_many_qc_outliers = sample_id %in% highAmountOutlier)
+
+# Flag #6: QC metrics association to PC1:10
+# Get sample PC scores
+
+# convert DFrame safely
+#df_qc <- as.data.frame(qcMetrics.subset)
+
+# keep only numeric QC metrics
+df_qc_num <- df_qc[, sapply(df_qc, is.numeric)]
+
+# remove columns with zero variance
+df_qc_num <- df_qc_num[, apply(df_qc_num, 2, sd, na.rm=TRUE) > 0]
+
+# z-score scale QC metrics (column-wise scaling)
+z <- scale(df_qc_num)
+
+# PCA
+pc <- prcomp(z, center = TRUE, scale. = FALSE)
+
+#Flag samples ±2 SD
+# sample PC scores
+pc_scores <- as.data.frame(pc$x[,1:2])
+pc_scores$sample_id <- rownames(pc_scores)
+
+# helper
+flag_sd <- function(v, k = 2){
+  abs(v - mean(v, na.rm = TRUE)) > k * sd(v, na.rm = TRUE)
+}
+
+# flags
+pc_scores$flag_PC1_2SD <- flag_sd(pc_scores$PC1)
+pc_scores$flag_PC2_2SD <- flag_sd(pc_scores$PC2)
+
+# final QC-PCA flag (Flag #7)
+pc_scores$flag_QC_PC_outlier <- pc_scores$flag_PC1_2SD | pc_scores$flag_PC2_2SD
+
+
+qc_tbl$flag_QC_PC_outlier <- pc_scores$flag_QC_PC_outlier[
+  match(qc_tbl$sample_id, pc_scores$sample_id)
+]
+
+qc_tbl$QC_PC1 <- pc_scores$PC1[match(qc_tbl$sample_id, pc_scores$sample_id)]
+qc_tbl$QC_PC2 <- pc_scores$PC2[match(qc_tbl$sample_id, pc_scores$sample_id)]
+
+# Flag #7: Sex QC PCA
+# merge sex QC into qc_tbl
+qc_tbl <- qc_tbl %>%
+  left_join(
+    qc.sex %>%
+      select(
+        sample_id = sample,
+        inferred_sex,
+        sex_PC1,
+        sex_PC2,
+        XIST,
+        Y_mean,
+        boundary_dist,
+        mdist,
+        sex_qc_flag,
+        flag_sex_near_boundary,
+        flag_sex_within_group_outlier,
+        flag_sex_QC_PC_outlier
+      ),
+    by = "sample_id"
+  )
+
+#### Final: a per-sample tally + per-category counts
+
+flag_cols <- grep("^flag_", names(qc_tbl), value = TRUE)
+
+qc_tbl <- qc_tbl %>%
+  mutate(
+    n_flags = rowSums(across(all_of(flag_cols), ~ as.integer(replace_na(.x, FALSE))), na.rm = TRUE)
+  )
+
+qc_tbl <- qc_tbl %>%
+  column_to_rownames("sample_id")
+
+qc_tbl %>%
+  knitr::kable(
+    format = "html", align = rep("c", ncol(QCPC.table) + 1),
+    row.names = TRUE
+  ) %>%
+  kableExtra::kable_styling() %>%
+  kableExtra::scroll_box(height = "250px")
+
+qc_tbl %>%
+  tibble::rownames_to_column("sample_id") %>%
+  readr::write_tsv(qcFile)
+```
+
+### Heatmap of all QC flags (tissue/site subset)
+```{r flagged_all_samples, fig.width = 24, fig.height = 10}
+
+# Build the flag matrix
+flag_cols <- grep("^flag_", names(qc_tbl), value = TRUE)
+
+flag_matrix <- qc_tbl %>%
+  select(all_of(flag_cols)) %>%
+  mutate(across(everything(), ~ as.integer(replace_na(.x, FALSE)))) %>%
+  as.matrix()
+
+# transpose: flags = rows, samples = columns
+flag_matrix <- t(flag_matrix)
+
+# assign sample IDs as column names
+colnames(flag_matrix) <- rownames(qc_tbl)
+
+# clean flag labels
+rownames(flag_matrix) <- gsub("^flag_", "", rownames(flag_matrix))
+rownames(flag_matrix) <- gsub("_", " ", rownames(flag_matrix))
+
+# Order samples by QC severity
+sample_order <- qc_tbl %>%
+  arrange(desc(n_flags)) %>%
+  rownames()
+
+flag_matrix <- flag_matrix[, sample_order, drop = FALSE]
+
+# top annotation: continuous covariates
+ha_col <- HeatmapAnnotation(
+  n_flags = qc_tbl[sample_order, "n_flags"],
+  RIN     = qc_tbl[sample_order, "RIN"],
+  TIN     = qc_tbl[sample_order, "TIN_median"],
+  DV200   = qc_tbl[sample_order, "DV200"],
+  which = "column"
+)
+
+# top barplot annotation
+ha_bar <- HeatmapAnnotation(
+  Flags = anno_barplot(
+    qc_tbl[sample_order, "n_flags"],
+    gp = gpar(fill = "black"),
+    border = FALSE,
+    height = unit(2.2, "cm")
+  ),
+  which = "column"
+)
+
+# Group QC flags
+qc_groups <- c(
+  "somalier cross patient"      = "Identity",
+  "hla cross patient"           = "Identity",
+  "sex near boundary"           = "Identity",
+  "sex within group outlier"    = "Identity",
+  "sex QC PC outlier"           = "Identity",
+  "high hetero"                 = "Identity",
+
+  "low tin rin"                 = "RNA integrity",
+  "3prime bias"                 = "RNA integrity",
+  "high rrna"                   = "RNA integrity",
+  "low dv200"                   = "RNA integrity",
+
+  "low genes or high exon cv"   = "Library quality",
+
+  "expr corr outlier"           = "Expression outlier",
+  "expr pca outlier"            = "Expression outlier",
+  "QC PC outlier"               = "Expression outlier",
+
+  "many qc outliers"            = "Global failure"
+)
+
+row_split <- qc_groups[rownames(flag_matrix)]
+
+ha_top <- c(ha_col, ha_bar)
+
+flag_col_fun <- colorRamp2(c(0, 1), c("white", "firebrick"))
+
+ht <- Heatmap(
+  flag_matrix,
+  name = "Flag",
+  col = flag_col_fun,
+  cluster_rows = FALSE,
+  cluster_columns = FALSE,
+  show_column_names = TRUE,
+  column_names_gp = gpar(fontsize = 11, fontface = "bold"),
+  top_annotation = ha_top,
+  row_split = row_split,
+  row_title_gp = gpar(fontsize = 11, fontface = "bold"),
+  column_title = "RNA-seq QC Flag Matrix",
+  rect_gp = gpar(col = "grey85")
+)
+
+draw(ht, heatmap_legend_side = "right", annotation_legend_side = "right")
+```
+
+### Heatmap of a priority sample subset (optional)
+
+This section is entirely **optional** and only runs if you supply
+`params$priority_list_file` — a spreadsheet (.xlsx) with a priority column
+(`params$priority_column`, default `"Priority"`) and one or more ID columns
+(`params$priority_id_cols`) that may match `rnaAnnot$sample_id`. It highlights the
+same QC flag matrix as above, restricted to samples flagged
+`params$priority_value` (default `"High"`) in that sheet — useful if your cohort has
+a subset of samples (e.g. a specific site, or samples earmarked for a follow-on
+analysis) you want to QC-review first. If you don't have such a list, skip this
+section (leave `priority_list_file = NULL`, the default).
+
+```{r flagged_priority_samples, fig.width = 18, fig.height = 10, eval = !is.null(priority_list_file)}
+priorityIds <- readxl::read_xlsx(priority_list_file)
+
+priorityHigh <- priorityIds[!is.na(priorityIds[[priority_column]]) &
+                               priorityIds[[priority_column]] == priority_value, ]
+target_ids <- rnaAnnot$sample_id
+
+# Try each configured ID column in turn until one matches a known sample_id
+match_priority_id <- function(row) {
+  for (col in priority_id_cols) {
+    if (col %in% names(row) && !is.na(row[[col]]) && row[[col]] %in% target_ids) {
+      return(row[[col]])
+    }
+  }
+  NA_character_
+}
+priorityHigh$Matched_ID <- apply(priorityHigh, 1, match_priority_id)
+
+highPrio <- qc_tbl[rownames(qc_tbl) %in% priorityHigh$Matched_ID, , drop = FALSE]
+
+flag_cols <- grep("^flag_", names(highPrio), value = TRUE)
+
+flag_matrix <- highPrio %>%
+  select(all_of(flag_cols)) %>%
+  mutate(across(everything(), ~ as.integer(replace_na(.x, FALSE)))) %>%
+  as.matrix()
+
+flag_matrix <- t(flag_matrix)
+colnames(flag_matrix) <- rownames(highPrio)
+
+rownames(flag_matrix) <- gsub("^flag_", "", rownames(flag_matrix))
+rownames(flag_matrix) <- gsub("_", " ", rownames(flag_matrix))
+
+sample_order <- highPrio %>%
+  arrange(desc(n_flags)) %>%
+  rownames()
+
+flag_matrix <- flag_matrix[, sample_order, drop = FALSE]
+
+ha_col <- HeatmapAnnotation(
+  n_flags = highPrio[sample_order, "n_flags"],
+  RIN     = highPrio[sample_order, "RIN"],
+  TIN     = highPrio[sample_order, "TIN_median"],
+  DV200   = highPrio[sample_order, "DV200"],
+  which = "column"
+)
+
+ha_bar <- HeatmapAnnotation(
+  Flags = anno_barplot(
+    highPrio[sample_order, "n_flags"],
+    gp = gpar(fill = "black"),
+    border = FALSE,
+    height = unit(2.2, "cm")
+  ),
+  which = "column"
+)
+
+row_split <- qc_groups[rownames(flag_matrix)]
+ha_top <- c(ha_col, ha_bar)
+
+flag_col_fun <- colorRamp2(c(0, 1), c("white", "firebrick"))
+
+ht_pri <- Heatmap(
+  flag_matrix,
+  name = "Flag",
+  col = flag_col_fun,
+  cluster_rows = FALSE,
+  cluster_columns = FALSE,
+  show_column_names = TRUE,
+  column_names_gp = gpar(fontsize = 11, fontface = "bold"),
+  top_annotation = ha_top,
+  row_split = row_split,
+  row_title_gp = gpar(fontsize = 11, fontface = "bold"),
+  column_title = "RNA-seq QC Flag Matrix (priority subset)",
+  rect_gp = gpar(col = "grey85")
+)
+
+draw(ht_pri, heatmap_legend_side = "right", annotation_legend_side = "right")
+```
+
+
+
+## Save filtered SE with appended RNA annotation
+`r if (!is.null(output_se)) paste0("The full SE object with appended RNA annotation will be saved to: ", basename(output_se), ".") else "`output_se` was not provided (NULL), so the full annotated SE is not being saved by this report."`
+```{r save_full_object}
+# NOTE: the original script had this saveRDS() call commented out, so `output_se`
+# was documented but silently never written. Restored to actually respect the param
+# (matching the behavior of the per-tissue save below), guarded so it's a no-op
+# unless you explicitly set params$output_se.
+if (!is.null(output_se)) {
+  saveRDS(se, output_se)
+}
+```
+
+## Save filtered SE per tissue type
+The filtered per tissue type SE object with appended RNA annotation will be saved to the file: ```r basename(output_se_per)```.
+```{r save_per_tissue}
+if (!is.null(output_se_per)){
+  saveRDS(se.subset, output_se_per)
+}
+```
+
+## Session Information
+```{r session_info, eval = showSession}
+rm(list = ls())
+gc()
+sessionInfo()
+```
+

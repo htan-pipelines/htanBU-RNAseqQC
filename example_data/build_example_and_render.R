@@ -28,7 +28,11 @@ dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 # ------------------------------------------------------------------------------
 # 1. Sample design
 # ------------------------------------------------------------------------------
-n_lung_siteA <- 10   # the tissue x site combination we'll actually render
+# qc_report.Rmd's se.subset filters by tissue_type only, so all "Lung" samples
+# (across both sites below) end up in the tissue we'll actually render;
+# collection_site still varies within/across tissues purely to give the general
+# stats plots and PCA shape aesthetics something to show.
+n_lung_siteA <- 10
 n_lung_siteB <- 2
 n_nasal_siteA <- 2
 n <- n_lung_siteA + n_lung_siteB + n_nasal_siteA
@@ -256,9 +260,8 @@ rmarkdown::render(
     ),
     tissueType = "Synthetic Example QC",
     tissue = "Lung",
-    site = "SiteA",
     output_se = file.path(output_dir, "annotated_Gene_Expression.rds"),
-    output_se_per = file.path(output_dir, "Lung_SiteA_Gene_Expression.rds"),
+    output_se_per = file.path(output_dir, "Lung_Gene_Expression.rds"),
     qcFile = file.path(output_dir, "qc_flag_summary.tsv"),
     showSession = TRUE
   ),

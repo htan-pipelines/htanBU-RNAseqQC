@@ -38,7 +38,7 @@ per-sample outputs directly — everything it needs comes out of the aggregation
 | `genotypes` | Per-sample HLA genotype calls, used as an independent identity check. | `Aggregation/aggregate.wdl` → `arcasHLA_merge.wdl` | `genotypes <- read.delim("genotypes.tsv")` |
 
 That's it — four objects. Everything else (QC cutoffs, which metadata columns
-mean what, whether to subset by tissue/site, whether to highlight a priority
+mean what, whether to subset by tissue, whether to highlight a priority
 sample subset) is a `param` with a sensible default, documented in the YAML
 header of `qc_report.Rmd`.
 
@@ -71,7 +71,7 @@ corresponding plots will just show blank/NA groupings rather than failing.
 htanBU-RNAseqQC/
 ├── README.md
 ├── qc_report.Rmd                  # the QC report itself (parameterized R Markdown)
-├── render_qc_report.R             # example driver: reads inputs, renders per tissue/site
+├── render_qc_report.R             # example driver: reads inputs, renders per tissue
 ├── generate_somalier_network.R    # standalone visNetwork -> somalier_network_graph.html
 └── example_data/
     └── build_example_and_render.R # builds a synthetic SE + metadata/somalier/genotypes
@@ -91,10 +91,9 @@ correctly before pointing the pipeline at real data.
    four input files and (if needed) your `column_map`.
 2. `Rscript render_qc_report.R`
 
-This renders one HTML report per `tissue_type` × `collection_site` combination
-found in your metadata (set `site_col = NULL` in the config to render one
-report per tissue type only), writes the per-sample QC flag table as a `.tsv`,
-optionally writes the tissue/site-subset `SummarizedExperiment`, and generates
+This renders one HTML report per `tissue_type` found in your metadata, writes
+the per-sample QC flag table as a `.tsv`, optionally writes the tissue-subset
+`SummarizedExperiment`, and generates
 `somalier_network_graph.html` — an interactive relatedness network you can open directly in
 a browser (search/filter by sample or patient, hover for relatedness values,
 cross-patient matches are colored red).
@@ -109,7 +108,7 @@ rmarkdown::render(
     column_map = list(sample_id = "your_id_col", patient_id = "your_patient_col",
                        tissue_type = "your_tissue_col", collection_site = "your_site_col",
                        cohort = "your_cohort_col", batch_id = "your_batch_col"),
-    tissue = "Your Tissue Type", site = NULL,
+    tissue = "Your Tissue Type",
     tissueType = "My Cohort QC"
   )
 )

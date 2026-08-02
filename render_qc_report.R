@@ -4,8 +4,8 @@
 #
 # Example/template driver for htanBU-RNAseqQC (qc_report.Rmd).
 #
-# Renders qc_report.Rmd once per tissue_type x collection_site combination found
-# in your metadata, after both stages of the bulk-rna-seq-pipeline have been run:
+# Renders qc_report.Rmd once per tissue_type found in your metadata, after both
+# stages of the bulk-rna-seq-pipeline have been run:
 #   1. RNA_seq_pipeline.wdl  (per sample)
 #   2. Aggregation/aggregate.wdl (across the cohort)
 #      https://github.com/htan-pipelines/bulk-rna-seq-pipeline
@@ -51,10 +51,8 @@ config <- list(
   # Free-text label used in the report title/header
   report_title = "Bulk RNA-seq QC",
 
-  # Which columns to split reports on. Set site_col to NULL to render one report
-  # per tissue type only (no site-level split).
+  # Which column to split reports on.
   tissue_col = "tissue_type",
-  site_col   = "collection_site",
 
   # QC flagging cutoffs -- see qc_report.Rmd YAML header for definitions.
   # Leave as-is to use the report's built-in defaults, or override per project.
@@ -104,19 +102,17 @@ output_se <- if (isTRUE(config$save_annotated_se)) {
 } else NULL
 
 # ------------------------------------------------------------------------------
-# Derive the tissue x site combinations to report on directly from the metadata,
-# instead of hardcoding a fixed list -- this works for any cohort/tissue set.
+# Derive the tissue values to report on directly from the metadata, instead of
+# hardcoding a fixed list -- this works for any cohort/tissue set.
 # ------------------------------------------------------------------------------
 tissue_values <- sort(unique(as.character(rnaAnnot[[config$tissue_col]])))
-site_values <- if (!is.null(config$site_col)) sort(unique(as.character(rnaAnnot[[config$site_col]]))) else NA
 
-render_one <- function(tissue_value, site_value) {
-  tag <- gsub("[^A-Za-z0-9]+", "", paste0(tissue_value, if (!is.na(site_value)) site_value else ""))
+render_one <- function(tissue_value) {
+  tag <- gsub("[^A-Za-z0-9]+", "", tissue_value)
   out_subdir <- file.path(config$output_dir, tag)
   dir.create(out_subdir, recursive = TRUE, showWarnings = FALSE)
 
-  message("Rendering QC report for tissue='", tissue_value,
-          "'", if (!is.na(site_value)) paste0(", site='", site_value, "'") else "", " ...")
+  message("Rendering QC report for tissue='", tissue_value, "' ...")
 
   rmarkdown::render(
     "qc_report.Rmd",
@@ -128,7 +124,6 @@ render_one <- function(tissue_value, site_value) {
       column_map = config$column_map,
       tissueType = config$report_title,
       tissue = tissue_value,
-      site = if (is.na(site_value)) NULL else site_value,
       qc_cutoffs = config$qc_cutoffs,
       priority_list_file = config$priority_list_file,
       output_se = output_se,
@@ -143,9 +138,7 @@ render_one <- function(tissue_value, site_value) {
 }
 
 for (tv in tissue_values) {
-  for (sv in site_values) {
-    render_one(tv, sv)
-  }
+  render_one(tv)
 }
 
 # ------------------------------------------------------------------------------

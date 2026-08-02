@@ -35,7 +35,6 @@ params:
   # ---- Report labeling / subsetting ----
   tissueType: "Bulk RNA-seq QC"   # free-text title used in report headers
   tissue: NULL                     # value of `tissue_type` to subset on for section 2 (NULL = use all samples)
-  site: NULL                       # value of `collection_site` to subset on for section 2 (NULL = don't filter by site)
 
   # ---- QC flagging cutoffs (see "QC cutoffs used in this report" for definitions) ----
   qc_cutoffs: !r list(
@@ -60,7 +59,7 @@ params:
 
   # ---- Outputs ----
   output_se: NULL          # path to save the full annotated SE (skipped if NULL)
-  output_se_per: NULL      # path to save the tissue/site-subset SE (skipped if NULL)
+  output_se_per: NULL      # path to save the tissue-subset SE (skipped if NULL)
   qcFile: "qc_flag_summary.tsv"   # path to write the per-sample QC flag table (TSV)
   showSession: TRUE
 ---
@@ -146,7 +145,6 @@ genotypes <- params$genotypes
 column_map <- params$column_map
 tissueType <- params$tissueType
 tissue <- params$tissue
-site <- params$site
 qc_cutoffs <- params$qc_cutoffs
 priority_list_file <- params$priority_list_file
 priority_id_cols <- params$priority_id_cols
@@ -359,7 +357,7 @@ theme_bw() %+replace%
 ```{r qc-cutoff}
 # All cutoffs come from params$qc_cutoffs (see YAML header) so they can be
 # overridden per cohort/tissue without editing this file.
-# NOTE: this chunk used to live just above "QC Metric Overview" (after tissue/site
+# NOTE: this chunk used to live just above "QC Metric Overview" (after tissue
 # subsetting), but the Sample Swap/Contamination Check section above (HLA genotype
 # check specifically) reads `hla_cutoff` -- moved up here, right after setup, so
 # every cutoff is available before it's first used anywhere in the report.
@@ -701,12 +699,11 @@ legend("topright",
 ```
 
 
-# QC: (```r paste(basename(params$site), basename(params$tissue))```) Analysis
+# QC: (```r basename(params$tissue)```) Analysis
 ## QC Metric Overview {.tabset .tabset-fade}
 
 ```{r subset_tissueType}
 se.subset <- se[,which(colData(se)$tissue_type == tissue)]
-se.subset <- se.subset[,which(colData(se.subset)$collection_site == site)]
 qcMetrics.subset <- select_qc_metrics(se_object = se.subset)
 
 ```
@@ -1226,7 +1223,7 @@ for (i in 1:ncol(qcMetrics.subset)) {
 }
 # Filter dataset to remove constant QC metrics
 # NOTE: `-rm.ix.qc` errors ("invalid argument to unary operator") when rm.ix.qc is
-# NULL, i.e. when no QC metric happens to be constant across this tissue/site subset
+# NULL, i.e. when no QC metric happens to be constant across this tissue subset
 # -- guard so that case (a real possibility, not just an edge case) doesn't crash.
 qc.metrics.unique.col <- if (length(rm.ix.qc) > 0) qcMetrics.subset[-rm.ix.qc] else qcMetrics.subset
 
@@ -1935,7 +1932,7 @@ qc_tbl %>%
   readr::write_tsv(qcFile)
 ```
 
-### Heatmap of all QC flags (tissue/site subset)
+### Heatmap of all QC flags (tissue subset)
 ```{r flagged_all_samples, fig.width = 24, fig.height = 10}
 
 # Build the flag matrix

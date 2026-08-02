@@ -179,6 +179,23 @@ mk_disc_cols <- function(x, palette = "Set1") {
   setNames(cols, lev)
 }
 
+# plotly::ggplotly() can throw ("subscript out of bounds" in gg2list's plot-margin
+# unit conversion, among other internal errors) on some ggplot objects depending on
+# plotly/ggplot2 version and the specific plot's scale/legend configuration -- a
+# real, observed failure mode on real cohort data that's been hard to pin to one
+# root cause. Since these plots are also perfectly viewable as static ggplots, don't
+# let a plotly conversion failure take down the whole report: fall back to the
+# static plot (with a warning) instead of erroring out.
+safe_ggplotly <- function(p, ...) {
+  tryCatch(
+    plotly::ggplotly(p, ...),
+    error = function(e) {
+      warning("ggplotly() failed (", conditionMessage(e), "); showing a static plot instead.")
+      p
+    }
+  )
+}
+
 # Set up Rmarkdown display options
 dev <- c("png", "pdf")
 knitr::opts_chunk$set(
@@ -1116,7 +1133,7 @@ plot2 <- ggplot(as.data.frame(pca$rotation[,c(1,2)]),
   xlab(paste0("PC1: ",percentVar[1],"% variance")) +
   ylab(paste0("PC2: ",percentVar[2],"% variance"))
 #plot2
-ggplotly(plot2)
+safe_ggplotly(plot2)
 ```
 
 
@@ -1133,7 +1150,7 @@ plot3 <- ggplot(as.data.frame(pca$rotation[,c(1,2)]),
   xlab(paste0("PC1: ",percentVar[1],"% variance")) +
   ylab(paste0("PC2: ",percentVar[2],"% variance"))
 #plot3
-ggplotly(plot3)
+safe_ggplotly(plot3)
 ```
 
 
@@ -1165,7 +1182,7 @@ plot4 <- ggplot(as.data.frame(pca$rotation[,c(1,2)]),
   #labs(color='Outliers',shape= "Site") 
   
 
-ggplotly(plot4)
+safe_ggplotly(plot4)
 
 ```
 
@@ -1202,7 +1219,7 @@ batch.plot <- ggplot(as.data.frame(pca.before$rotation[,c(1,2)]),
   theme(text = element_text(size = 14)) 
 
 
-ggplotly(batch.plot)
+safe_ggplotly(batch.plot)
 ```
 
 ## QC Tally and Number of Outliers Binned {.tabset .tabset-fade}
@@ -1405,7 +1422,7 @@ plotpca <- ggplot(pcabothtype,
   ggplot2::theme(legend.title = ggplot2::element_text(size = 15), legend.text = ggplot2::element_text(size = 13)) #+
   #ggplot2::guides(colour = ggplot2::guide_legend(override.aes = list(size = 2)))
 #plotpca
-ggplotly(plotpca)
+safe_ggplotly(plotpca)
 ```
 
 Top two principal components (PCs) of z-score scaled QC metrics. Shape illustrates number of outliers binned and color shows range of RIN values. 

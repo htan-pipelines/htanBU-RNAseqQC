@@ -1,0 +1,13 @@
+sample_id	patient_id	Adequacy_group	batch	rin	dv200
+Data2Cohort_P01_S1	Data2Cohort_P01	Adequate	Batch1	5.8	87.4
+Data2Cohort_P02_S1	Data2Cohort_P02	Adequate	Batch2	8	58.8
+Data2Cohort_P03_S1	Data2Cohort_P03	Borderline	Batch1	5.9	54
+Data2Cohort_P04_S1	Data2Cohort_P04	Intermediate	Batch2	7.5	86.7
+Data2Cohort_P05_S1	Data2Cohort_P05	Adequate	Batch1	8.6	68.7
+Data2Cohort_P06_S1	Data2Cohort_P06	Adequate	Batch2	8.7	86.2
+Data2Cohort_P07_S1	Data2Cohort_P07	Borderline	Batch1	6.2	53.9
+Data2Cohort_P08_S1	Data2Cohort_P08	Intermediate	Batch2	6.1	80.6
+Data2Cohort_P09_S1	Data2Cohort_P09	Adequate	Batch1	8.9	79.1
+Data2Cohort_P10_S1	Data2Cohort_P10	Adequate	Batch2	7.5	89.4
+Data2Cohort_P11_S1	Data2Cohort_P11	Borderline	Batch1	8.1	70.7
+Data2Cohort_P12_S1	Data2Cohort_P12	Intermediate	Batch2	7.3	78.5

@@ -62,8 +62,36 @@ column_map = list(
 ```
 
 Only `sample_id` is strictly required, and it must match `colnames(se)` after
-mapping. Leave any other entry pointing at a column you don't have — the
-corresponding plots will just show blank/NA groupings rather than failing.
+mapping. `tissue_type`, `collection_site`, and `cohort` are all genuinely
+optional — omit any of them (or leave the entry `NULL`) and the corresponding
+sections/plots are skipped automatically rather than failing:
+- Without `tissue_type`, there's nothing to subset the report on — `params$tissue`
+  is ignored and the whole cohort is analyzed as one report (same as
+  `render_qc_report.R`'s `tissue_col = NULL`).
+- `collection_site`/`cohort` (and `tissue_type` when present) feed into
+  `params$group_vars` — see below.
+
+### Extra grouping / variable(s) of interest
+
+`collection_site` and `cohort` aren't hardcoded — they're just the *default*
+value of `params$group_vars`, a vector of column names (as they appear in
+`rnaAnnot` after `column_map`) used as extra categorical breakdown dimensions
+in the general-stats plots, PCA point shapes, and somalier heatmap annotation.
+`group_vars` entries don't need a `column_map` slot at all — any column
+already present in `rnaAnnot`, including study-specific ones with no canonical
+name here, works directly:
+
+```r
+group_vars = c("Adequacy_group")   # e.g. a cohort with no tissue/site/cohort
+                                    # concept, whose real variable of interest
+                                    # is something else entirely
+```
+
+This is the intended way to adapt the report to a different study's variable(s)
+of interest without editing `qc_report.Rmd` itself — see
+`example_data/build_example_and_render.R`'s second ("data2-style") scenario for
+a complete runnable example of a cohort with no `tissue_type`/`collection_site`/
+`cohort` at all.
 
 ## Repo layout
 
@@ -74,18 +102,24 @@ htanBU-RNAseqQC/
 ├── render_qc_report.R             # example driver: reads inputs, renders per tissue
 ├── generate_somalier_network.R    # standalone visNetwork -> somalier_network_graph.html
 └── example_data/
-    └── build_example_and_render.R # builds a synthetic SE + metadata/somalier/genotypes
-                                    # tables and renders qc_report.Rmd against them end to
-                                    # end -- a smoke test with no real data required
+    └── build_example_and_render.R # builds two synthetic datasets and renders
+                                    # qc_report.Rmd against each end to end -- a smoke
+                                    # test with no real data required. The first has
+                                    # tissue_type/collection_site/cohort (output under
+                                    # example_data/output/); the second has none of
+                                    # those, using group_vars = c("Adequacy_group")
+                                    # instead (output under example_data/data2_style/)
 ```
 
 ## Usage
 
 Don't have real pipeline outputs handy yet? `Rscript example_data/build_example_and_render.R`
-builds a small synthetic dataset (fake SE, metadata, somalier pairs, genotypes) and
-renders the full report end to end against it, writing everything to
-`example_data/output/` -- useful for confirming your R environment is set up
-correctly before pointing the pipeline at real data.
+builds two small synthetic datasets (fake SE, metadata, somalier pairs, genotypes) —
+one with the full `tissue_type`/`collection_site`/`cohort` schema, one without (using
+`group_vars` instead) — and renders the full report end to end against each, writing
+everything to `example_data/output/` and `example_data/data2_style/output/`
+respectively -- useful for confirming your R environment is set up correctly, and for
+seeing both usage patterns, before pointing the pipeline at real data.
 
 1. Edit the `config` block at the top of `render_qc_report.R` to point at your
    four input files and (if needed) your `column_map`.
@@ -110,6 +144,8 @@ rmarkdown::render(
                        cohort = "your_cohort_col", batch_id = "your_batch_col"),
     tissue = "Your Tissue Type",
     tissueType = "My Cohort QC"
+    # group_vars defaults to c("collection_site", "cohort"); override if your cohort
+    # doesn't have those, e.g. group_vars = c("Adequacy_group")
   )
 )
 ```

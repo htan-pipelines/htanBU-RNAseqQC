@@ -19,8 +19,13 @@ params:
   # ---- Column-name mapping ----
   # This report standardizes on the canonical column names below (right-hand side).
   # Point each entry at whatever column holds that information in YOUR rnaAnnot file.
-  # Only `sample_id` is strictly required to match colnames(se); the rest are used for
-  # grouping/plotting and can be left as-is (or NA) if you don't have that field.
+  # Only `sample_id` is strictly required to match colnames(se); `tissue_type`,
+  # `collection_site`, and `cohort` are all fully optional -- if your cohort doesn't
+  # have one of these concepts (e.g. a single-tissue study), just omit that entry (or
+  # leave it NULL) and the corresponding sections/plots are skipped automatically.
+  # `group_vars` (below) doesn't need a column_map entry at all -- any column present
+  # in rnaAnnot after this mapping, including ones with no canonical slot here (e.g. a
+  # study-specific "Adequacy_group"), can be named directly.
   column_map: !r list(
     sample_id       = "entity.pcga2_biospecimen_id",
     patient_id      = "patient_ID",
@@ -34,7 +39,17 @@ params:
 
   # ---- Report labeling / subsetting ----
   tissueType: "Bulk RNA-seq QC"   # free-text title used in report headers
-  tissue: NULL                     # value of `tissue_type` to subset on for section 2 (NULL = use all samples)
+  tissue: NULL                     # value of `tissue_type` to subset on for section 2 (NULL = use all samples,
+                                    # or if there's no `tissue_type` column at all)
+
+  # ---- Extra grouping/breakdown variables ----
+  # Column name(s) (post column_map, as they appear in rnaAnnot) to use as additional
+  # categorical breakdown dimensions in the general-stats plots, PCA shape aesthetic,
+  # and somalier heatmap annotation -- wherever `collection_site`/`cohort` show up
+  # below. Default reproduces the original collection_site + cohort breakdowns. For a
+  # cohort without those concepts, point this at whatever variable(s) of interest your
+  # study actually has, e.g. `c("Adequacy_group")`.
+  group_vars: !r c("collection_site", "cohort")
 
   # ---- QC flagging cutoffs (see "QC cutoffs used in this report" for definitions) ----
   qc_cutoffs: !r list(
@@ -145,6 +160,7 @@ genotypes <- params$genotypes
 column_map <- params$column_map
 tissueType <- params$tissueType
 tissue <- params$tissue
+group_vars <- params$group_vars
 qc_cutoffs <- params$qc_cutoffs
 priority_list_file <- params$priority_list_file
 priority_id_cols <- params$priority_id_cols
@@ -242,6 +258,21 @@ if (length(mismatched_ids) > 0) {
           if (length(mismatched_ids) > 10) ", ..." else "")
 }
 
+# `tissue_type` is fully optional: cohorts with a single tissue (or none tracked at
+# all) simply skip every tissue_type-specific section/subsetting step below.
+has_tissue_type <- "tissue_type" %in% colnames(rnaAnnot)
+if (!has_tissue_type) tissue <- NULL
+
+# Drop any group_vars entries that don't actually exist in rnaAnnot (e.g. a typo, or
+# a column_map mismatch) rather than erroring deep inside some later plot.
+bad_group_vars <- group_vars[!group_vars %in% colnames(rnaAnnot)]
+if (length(bad_group_vars) > 0) {
+  warning("htanBU-RNAseqQC: ", length(bad_group_vars),
+          " params$group_vars not found in rnaAnnot (after column_map): ",
+          paste(bad_group_vars, collapse = ", "), " -- dropping.")
+}
+group_vars <- setdiff(group_vars, bad_group_vars)
+
 # Re-order rnaAnnot to match the sample order in the SummarizedExperiment
 rnaAnnot <- rnaAnnot[match(colnames(se), rnaAnnot$sample_id), ]
 rownames(rnaAnnot) <- gsub(" ", "", rnaAnnot$sample_id)
@@ -250,125 +281,121 @@ rownames(rnaAnnot) <- gsub(" ", "", rnaAnnot$sample_id)
 
 ## General Statistics Plots {.tabset .tabset-fade}
 
-### Tissue type
-
-```{r tissue_type}
-
-colors <- mk_disc_cols(rnaAnnot$tissue_type, "Set1")
-
-ggplot(rnaAnnot, aes(tissue_type, fill = tissue_type)) +
-  geom_bar(position = position_fill()) +
-  geom_text(aes(label = ..count..),
-            stat = "count",
-            colour = "white",
-            position = position_fill(vjust = 0.3),size=9) +
-  geom_text(aes(label = paste0(round(..count../sum(..count..)*100,2), "%")),
-            stat = "count",
-            colour = "white",
-            position = position_fill(vjust = 0.5),size=9) +
-  scale_fill_manual(values = colors) +
-  coord_flip() +
-  guides(fill = guide_legend(title = "Tissue type"))+
-  theme_bw() %+replace%
-    theme(panel.grid.major = element_blank(),
-          panel.grid.minor = element_blank(),
-          panel.border = element_blank(),
-          text = element_text(size = 19, family = "serif"),
-          axis.ticks = element_blank(),
-          axis.title.y = element_blank(),
-          axis.title.x = element_blank(),
-          axis.text.x = element_blank(),
-          axis.text.y = element_text(color = "black"),
-          legend.position = "top",
-          legend.text = element_text(size = 15),
-          legend.key.size = unit(1, "char")
-    )
-```
-
-### Tissue type per participant
-
-```{r tissue_per_participant}
-# tissue per patient ID 
-summary.samples <-  rnaAnnot %>% select(sample_id,patient_id,tissue_type, collection_site, cohort) %>%
-  dplyr::group_by(patient_id, tissue_type, collection_site, cohort) %>%
+```{r build_summary_samples}
+# Always runs (regardless of which of tissue_type/group_vars are present) since the
+# per-group_var panels below all depend on it. Built from whatever combination of
+# patient_id + tissue_type (if present) + group_vars actually exists in rnaAnnot.
+core_cols <- c("patient_id", if (has_tissue_type) "tissue_type", group_vars)
+summary.samples <- rnaAnnot %>%
+  dplyr::select(sample_id, dplyr::all_of(core_cols)) %>%
+  dplyr::group_by(dplyr::across(dplyr::all_of(core_cols))) %>%
   dplyr::count(patient_id)
-#summary.samples
-
-ggplot(summary.samples, aes(x=patient_id, y=n))+
-  geom_bar(aes(fill=tissue_type),stat="identity",position="stack")+
-  labs(y="Total tissue count", x = "Participant")+
-  #scale_y_continuous(breaks = round(seq(min(summary.samples$n),max(summary.samples$n), by = 1),1))+
-  scale_y_continuous(breaks = round(seq(min(summary.samples$n),15, by = 1),1))+
-  scale_fill_manual(values = colors) +
-  #theme(axis.text.x = element_text(angle=-90, hjust=.1))
-  guides(fill = guide_legend(title = "Tissue type"))+
-theme_bw() %+replace%
-    theme(panel.grid.major = element_blank(),
-          panel.grid.minor = element_blank(),
-          panel.border = element_blank(),
-          text = element_text(size = 19, family = "serif"),
-          axis.ticks = element_blank(),
-          #axis.title.y = element_blank(),
-          #axis.title.x = element_blank(),
-          #axis.text.x = element_blank(),
-          axis.text.x = element_text(angle=-90, hjust=.1),
-          axis.text.y = element_text(color = "black"),
-          legend.position = "top",
-          legend.text = element_text(size = 20),
-          legend.key.size = unit(1, "char")
-    )
 ```
 
-### Tissue typer per site
+```{r tissue_type_panel, results = "asis"}
+# results='asis' + a conditional cat() heading (matching the group_var_panels
+# pattern below) so the tab is skipped ENTIRELY -- not just left empty -- when
+# there's no tissue_type column. A plain `eval=` on this chunk would still leave
+# behind a static "### Tissue type" markdown heading with nothing under it, since
+# that heading lives outside the chunk.
+if (has_tissue_type) {
+  cat("\n\n### Tissue type\n\n")
 
-```{r tissue_per_site}
-colors <- mk_disc_cols(rnaAnnot$collection_site, "Set1")
-ggplot(summary.samples, aes(fill=collection_site, y=n, x=tissue_type))+
-  geom_bar(stat="identity",position="stack")+
-  labs(y="Total tissue count", x = NULL)+
-  #scale_y_continuous(breaks = round(seq(min(summary.samples$n),max(summary.samples$n), by = 1),1))+
-  #scale_y_continuous(breaks = round(seq(min(summary.samples$n),15, by = 1),1))+
-  scale_fill_manual(values = colors) +
-  #theme(axis.text.x = element_text(angle=-90, hjust=.1))
-  guides(fill = guide_legend(title = "Collection site"))+
-theme_bw() %+replace%
-    theme(panel.grid.major = element_blank(),
-          panel.grid.minor = element_blank(),
-          panel.border = element_blank(),
-          text = element_text(size = 19, family = "serif"),
-          axis.ticks = element_blank(),
-          #axis.title.y = element_blank(),
-          axis.title.x = element_blank(),
-          #axis.text.x = element_blank(),
-          #axis.text.x = element_text(angle=-90, hjust=.1),
-          axis.text.y = element_text(color = "black"),
-          legend.position = "top",
-          legend.text = element_text(size = 20),
-          legend.key.size = unit(1, "char")
-    )
+  colors <- mk_disc_cols(rnaAnnot$tissue_type, "Set1")
+
+  p <- ggplot(rnaAnnot, aes(tissue_type, fill = tissue_type)) +
+    geom_bar(position = position_fill()) +
+    geom_text(aes(label = ..count..),
+              stat = "count",
+              colour = "white",
+              position = position_fill(vjust = 0.3),size=9) +
+    geom_text(aes(label = paste0(round(..count../sum(..count..)*100,2), "%")),
+              stat = "count",
+              colour = "white",
+              position = position_fill(vjust = 0.5),size=9) +
+    scale_fill_manual(values = colors) +
+    coord_flip() +
+    guides(fill = guide_legend(title = "Tissue type"))+
+    theme_bw() %+replace%
+      theme(panel.grid.major = element_blank(),
+            panel.grid.minor = element_blank(),
+            panel.border = element_blank(),
+            text = element_text(size = 19, family = "serif"),
+            axis.ticks = element_blank(),
+            axis.title.y = element_blank(),
+            axis.title.x = element_blank(),
+            axis.text.x = element_blank(),
+            axis.text.y = element_text(color = "black"),
+            legend.position = "top",
+            legend.text = element_text(size = 15),
+            legend.key.size = unit(1, "char")
+      )
+  print(p)
+  cat("\n")
+}
 ```
 
-### Tissue type per cohort
+```{r tissue_per_participant_panel, results = "asis"}
+if (has_tissue_type) {
+  cat("\n\n### Tissue type per participant\n\n")
 
-```{r tissue_per_cohort}
-colors <- mk_disc_cols(rnaAnnot$cohort, "Set1")
-ggplot(summary.samples, aes(fill=cohort, y=n, x=tissue_type))+
-geom_bar(stat="identity",position="stack")+
-labs(y="Total tissue count", x = NULL)+
-scale_fill_manual(values = colors) +
-guides(fill = guide_legend(title = "Cohort"))+
-theme_bw() %+replace%
-  theme(panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank(),
-        panel.border = element_blank(),
-        text = element_text(size = 19, family = "serif"),
-        axis.ticks = element_blank(),
-        axis.title.x = element_blank(),
-        axis.text.y = element_text(color = "black"),
-        legend.position = "top",
-        legend.text = element_text(size = 20),
-        legend.key.size = unit(1, "char")
-  )
+  colors <- mk_disc_cols(rnaAnnot$tissue_type, "Set1")
+
+  p <- ggplot(summary.samples, aes(x=patient_id, y=n))+
+    geom_bar(aes(fill=tissue_type),stat="identity",position="stack")+
+    labs(y="Total tissue count", x = "Participant")+
+    scale_y_continuous(breaks = round(seq(min(summary.samples$n),15, by = 1),1))+
+    scale_fill_manual(values = colors) +
+    guides(fill = guide_legend(title = "Tissue type"))+
+  theme_bw() %+replace%
+      theme(panel.grid.major = element_blank(),
+            panel.grid.minor = element_blank(),
+            panel.border = element_blank(),
+            text = element_text(size = 19, family = "serif"),
+            axis.ticks = element_blank(),
+            axis.text.x = element_text(angle=-90, hjust=.1),
+            axis.text.y = element_text(color = "black"),
+            legend.position = "top",
+            legend.text = element_text(size = 20),
+            legend.key.size = unit(1, "char")
+      )
+  print(p)
+  cat("\n")
+}
+```
+
+```{r group_var_panels, results = "asis"}
+# One tab per params$group_vars entry (default c("collection_site", "cohort"),
+# reproducing the original two fixed "per site"/"per cohort" panels exactly). When
+# tissue_type is present, each panel breaks that variable down by tissue_type, same as
+# before; otherwise it falls back to a simple frequency count of the variable alone.
+for (v in group_vars) {
+  cat("\n\n### ", v, "\n\n")
+
+  colors <- mk_disc_cols(rnaAnnot[[v]], "Set1")
+  x_var <- if (has_tissue_type) "tissue_type" else v
+
+  p <- ggplot(summary.samples, aes(x = .data[[x_var]], y = n, fill = .data[[v]])) +
+    geom_bar(stat = "identity", position = "stack") +
+    labs(y = "Total count", x = if (has_tissue_type) NULL else v) +
+    scale_fill_manual(values = colors) +
+    guides(fill = guide_legend(title = v)) +
+    theme_bw() %+replace%
+      theme(panel.grid.major = element_blank(),
+            panel.grid.minor = element_blank(),
+            panel.border = element_blank(),
+            text = element_text(size = 19, family = "serif"),
+            axis.ticks = element_blank(),
+            axis.title.x = element_blank(),
+            axis.text.y = element_text(color = "black"),
+            legend.position = "top",
+            legend.text = element_text(size = 20),
+            legend.key.size = unit(1, "char")
+      )
+
+  print(p)
+  cat("\n")
+}
 ```
 
 ```{r qc-cutoff}
@@ -514,11 +541,13 @@ qc.metrics <- select_qc_metrics(se_object = se)
 mat.sf.sym <- apply(mat.sf.sym, 1, function(x) ifelse(x > 1, 1, ifelse(x < -1, -1, x)))
 #mat.sf.sym <- apply(mat.sf.sym, 1, function(x) ifelse(x > 0.4, 0.4, ifelse(x < -0.4, 0, x)))
 
-# mk_disc_cols() is defined once in the setup chunk and reused here
-colorList <- list(
-  sample_type = mk_disc_cols(rnaAnnot$tissue_type, "Set1"),
-  site        = mk_disc_cols(rnaAnnot$collection_site, "Set1"),
-  cohort      = mk_disc_cols(rnaAnnot$cohort, "Set1")
+# mk_disc_cols() is defined once in the setup chunk and reused here. Discrete
+# annotation variables are tissue_type (if present) + params$group_vars -- dynamic so
+# this works regardless of which of those a given cohort actually has.
+disc_vars <- c(if (has_tissue_type) "tissue_type", group_vars)
+colorList <- setNames(
+  lapply(disc_vars, function(v) mk_disc_cols(rnaAnnot[[v]], "Set1")),
+  disc_vars
 )
 
 cont_fun <- function(v) circlize::colorRamp2(
@@ -535,17 +564,28 @@ colorList <- c(colorList, list(
   ranseqc_low_quality_reads            = cont_fun(qc.metrics$rnaseqc_Low.Quality.Reads)
 ))
 
+# NOTE: as.data.frame(lapply(character(0), ...)) is a 0-row/0-col data.frame, not an
+# N-row one -- cbind()-ing that against N-row data.frames below would error, so build
+# a proper N-row-but-0-column placeholder when there are no discrete vars at all.
+disc_df <- if (length(disc_vars) > 0) {
+  setNames(as.data.frame(lapply(disc_vars, function(v) rnaAnnot[[v]])), disc_vars)
+} else {
+  data.frame(row.names = seq_len(nrow(rnaAnnot)))
+}
 
 ha = HeatmapAnnotation(
-  df = data.frame(participant = rnaAnnot$patient_id, sample_type= rnaAnnot$tissue_type,
-                  site = rnaAnnot$collection_site, cohort= rnaAnnot$cohort,
-                  star_uniquely_mapped_per = qc.metrics$STAR_uniquely_mapped_percent,
-                  rnaseqc_median_transcript_coverage = qc.metrics$rnaseqc_Median.of.Avg.Transcript.Coverage,
-                  rnaseqc_rRNA_rate = qc.metrics$rnaseqc_rRNA.Rate,
-                  rnaseqc_high_quality_reads = qc.metrics$rnaseqc_High.Quality.Reads,
-                  samtools_properly_paired = qc.metrics$samtools_reads_properly_paired,
-                  ranseqc_low_quality_reads = qc.metrics$rnaseqc_Low.Quality.Reads
-                  ),
+  df = cbind(
+    data.frame(participant = rnaAnnot$patient_id),
+    disc_df,
+    data.frame(
+      star_uniquely_mapped_per = qc.metrics$STAR_uniquely_mapped_percent,
+      rnaseqc_median_transcript_coverage = qc.metrics$rnaseqc_Median.of.Avg.Transcript.Coverage,
+      rnaseqc_rRNA_rate = qc.metrics$rnaseqc_rRNA.Rate,
+      rnaseqc_high_quality_reads = qc.metrics$rnaseqc_High.Quality.Reads,
+      samtools_properly_paired = qc.metrics$samtools_reads_properly_paired,
+      ranseqc_low_quality_reads = qc.metrics$rnaseqc_Low.Quality.Reads
+    )
+  ),
   annotation_height = unit(4, "mm"),annotation_name_side = "left", col = colorList
 )
 dend1 = cluster_within_group(mat.sf.sym, rnaAnnot$patient_id)
@@ -716,11 +756,16 @@ legend("topright",
 ```
 
 
-# QC: (```r basename(params$tissue)```) Analysis
+# QC: (`r if (is.null(tissue)) tissueType else basename(tissue)`) Analysis
 ## QC Metric Overview {.tabset .tabset-fade}
 
 ```{r subset_tissueType}
-se.subset <- se[,which(colData(se)$tissue_type == tissue)]
+# tissue_type/tissue are optional -- with neither, se.subset is just the whole cohort.
+se.subset <- if (has_tissue_type && !is.null(tissue)) {
+  se[, which(colData(se)$tissue_type == tissue)]
+} else {
+  se
+}
 qcMetrics.subset <- select_qc_metrics(se_object = se.subset)
 
 ```
@@ -966,8 +1011,15 @@ normalizedQC.sub <- normalizedQC[rownames(normalizedQC) %in% qc_to_keep,]
 normalizedQC.sub <- t(apply(normalizedQC.sub, 1, function(x) ifelse(x > 6, 6, ifelse(x < -6, -6, x))))
 
 
-mat_col<-data.frame(sample=as.factor(colData(se.subset)$tissue_type))
-rownames(mat_col) <- colnames(se.subset)
+# Annotate by tissue_type if present, else fall back to the first group_var, else
+# skip annotation entirely (pheatmap's own default for "no annotation" is NA, not NULL).
+annot_var <- if (has_tissue_type) "tissue_type" else if (length(group_vars) > 0) group_vars[1] else NA
+if (!is.na(annot_var)) {
+  mat_col <- data.frame(sample = as.factor(colData(se.subset)[[annot_var]]))
+  rownames(mat_col) <- colnames(se.subset)
+} else {
+  mat_col <- NA
+}
 
 
 #Plot a heatmap of QC metrics across all samples
@@ -1125,14 +1177,15 @@ Outlier samples defined +/- 2sd away from the mean PC1 ad mean PC2
 ### PCA plot colored by TIN
 
 ```{r, EdgeR_pca_TIN_median,fig.width = 11, fig.height = 8}
-#ggplot(as.data.frame(pca$rotation[,c(1,2)]), aes(PC1,PC2, color=colData(se)$TIN_median, shape=colData(se)$tissue_type)) +
+# Shape by the first group_var (default collection_site), if any are configured.
+shape_var <- if (length(group_vars) > 0) group_vars[1] else NULL
 sample_id <- rownames(pca$rotation)
-plot2 <- ggplot(as.data.frame(pca$rotation[,c(1,2)]), 
+plot2 <- ggplot(as.data.frame(pca$rotation[,c(1,2)]),
                 aes(PC1,PC2,color=colData(se.subset)$TIN_median,label = sample_id)) +
-  geom_point(size=3,aes(shape=colData(se.subset)$collection_site)) +
+  (if (!is.null(shape_var)) geom_point(size=3,aes(shape=colData(se.subset)[[shape_var]])) else geom_point(size=3)) +
   xlab(paste0("PC1: ",percentVar[1],"% variance")) +
-  ylab(paste0("PC2: ",percentVar[2],"% variance"))
-#plot2
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) +
+  labs(shape = shape_var)
 safe_ggplotly(plot2)
 ```
 
@@ -1143,13 +1196,12 @@ TIN values illustrates for the variation that is observed and shape indicates wh
 ### PCA plot colored by RIN 
 
 ```{r, EdgeR_pca_RIN, fig.width = 11, fig.height = 8}
-#ggplot(as.data.frame(pca$rotation[,c(1,2)]),aes(PC1,PC2, color=colData(se)$RIN, shape=colData(se)$tissue_type)) +
 plot3 <- ggplot(as.data.frame(pca$rotation[,c(1,2)]),
                 aes(PC1,PC2, color=as.numeric(colData(se.subset)$RIN),label = sample_id)) +
-  geom_point(size=3, aes(shape=colData(se.subset)$collection_site)) +
+  (if (!is.null(shape_var)) geom_point(size=3, aes(shape=colData(se.subset)[[shape_var]])) else geom_point(size=3)) +
   xlab(paste0("PC1: ",percentVar[1],"% variance")) +
-  ylab(paste0("PC2: ",percentVar[2],"% variance"))
-#plot3
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) +
+  labs(shape = shape_var)
 safe_ggplotly(plot3)
 ```
 
@@ -1160,9 +1212,9 @@ RIN values illustrates for the variation that is observed and shape indicates wh
 ### PCA plot colored by outliers 
 
 ```{r, EdgeR_pca_outliers, fig.width = 10, fig.height = 8}
-#ggplot(as.data.frame(pca$rotation[,c(1,2)]), aes(PC1,PC2, color=out.color, shape=colData(se)$tissue_type)) +
-plot4 <- ggplot(as.data.frame(pca$rotation[,c(1,2)]), 
-                aes(PC1,PC2, shape=colData(se.subset)$collection_site, label = sample_id)) +
+plot4 <- ggplot(as.data.frame(pca$rotation[,c(1,2)]),
+                aes(PC1,PC2, label = sample_id)) +
+  (if (!is.null(shape_var)) aes(shape = colData(se.subset)[[shape_var]]) else NULL) +
   geom_point(size=4, aes(color = out.color)) +
   ggplot2::theme_bw() +
   ggplot2::theme(
@@ -1175,12 +1227,11 @@ plot4 <- ggplot(as.data.frame(pca$rotation[,c(1,2)]),
   ggplot2::ylab(paste0("PC2 (", percentVar[2], "%)")) +
   ggplot2::theme(legend.title = ggplot2::element_text(size = 15), legend.text = ggplot2::element_text(size = 13)) +
   ggplot2::guides(colour = ggplot2::guide_legend(override.aes = list(size = 2))) +
-  labs(color='Outliers',shape= "Site")+
+  labs(color='Outliers', shape = shape_var)+
   ggplot2::scale_color_manual(name = "Outliers",
                      values = c("firebrick", "blue"),
                      labels = c("no", "yes"))
-  #labs(color='Outliers',shape= "Site") 
-  
+
 
 safe_ggplotly(plot4)
 
@@ -1203,20 +1254,22 @@ pca.before <- prcomp(z.data,scale=F, center=F)
 perc.var <- (pca.before$sdev)^2/sum(pca.before$sdev^2)
 percentVar <- round(100 * perc.var)
 sampleID <- rownames(pca.before$rotation)
-batch.plot <- ggplot(as.data.frame(pca.before$rotation[,c(1,2)]), 
-                     aes(PC1,PC2, color=batch.sub, shape=colData(se.subset)$tissue_type,label=sampleID)) +
+# The tissue_type shape here was always single-level (se.subset is already
+# tissue-filtered, so it's purely decorative even when present) -- drop it entirely
+# when tissue_type isn't available at all.
+batch.plot <- ggplot(as.data.frame(pca.before$rotation[,c(1,2)]),
+                     aes(PC1,PC2, color=batch.sub, label=sampleID)) +
+  (if (has_tissue_type) aes(shape = colData(se.subset)$tissue_type) else NULL) +
   geom_point(size=3) +
   labs(#title = "Before batch effect correction",
        x = paste0("PC1: ",percentVar[1],"% variance"),
        y = paste0("PC2: ",percentVar[2],"% variance")) +
-   scale_shape_manual(name = "Sample Type",
-                       values = 16,
-                      labels =  tissue) +
-  scale_color_manual(name = tissue,
+   (if (has_tissue_type) scale_shape_manual(name = "Sample Type", values = 16, labels = tissue) else NULL) +
+  scale_color_manual(name = if (is.null(tissue)) tissueType else tissue,
                      #values = COLORS
                      values = myCol)+
   theme_classic() +
-  theme(text = element_text(size = 14)) 
+  theme(text = element_text(size = 14))
 
 
 safe_ggplotly(batch.plot)
@@ -2151,7 +2204,7 @@ if (!is.null(output_se)) {
 ```
 
 ## Save filtered SE per tissue type
-The filtered per tissue type SE object with appended RNA annotation will be saved to the file: ```r basename(output_se_per)```.
+`r if (!is.null(output_se_per)) paste0("The filtered per tissue type SE object with appended RNA annotation will be saved to the file: ", basename(output_se_per), ".") else "output_se_per was not provided (NULL), so this subset SE is not being saved by this report."`
 ```{r save_per_tissue}
 if (!is.null(output_se_per)){
   saveRDS(se.subset, output_se_per)

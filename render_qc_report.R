@@ -36,7 +36,9 @@ config <- list(
   genotypes_path = "path/to/your/genotypes.tsv",
 
   # Map YOUR metadata column names onto the canonical names the report expects.
-  # Must match params$column_map in qc_report.Rmd.
+  # Must match params$column_map in qc_report.Rmd. tissue_type/collection_site/cohort
+  # are all optional -- if your cohort doesn't have one of these concepts, just omit
+  # that entry (or leave it NULL).
   column_map = list(
     sample_id       = "sample_id",         # must match colnames(se) after mapping
     patient_id      = "patient_id",
@@ -51,8 +53,17 @@ config <- list(
   # Free-text label used in the report title/header
   report_title = "Bulk RNA-seq QC",
 
-  # Which column to split reports on.
+  # Which column to split reports on. Set to NULL for a single-tissue cohort (or any
+  # cohort you don't want split by tissue) -- one report covers everything.
   tissue_col = "tissue_type",
+
+  # Extra categorical breakdown variable(s) (as they appear in rnaAnnot after
+  # column_map) for the general-stats plots, PCA shape aesthetic, and somalier
+  # heatmap annotation -- see params$group_vars in qc_report.Rmd. Default reproduces
+  # the original collection_site + cohort breakdowns; point this at your own
+  # variable(s) of interest instead (e.g. c("Adequacy_group")) if your cohort doesn't
+  # have those.
+  group_vars = c("collection_site", "cohort"),
 
   # QC flagging cutoffs -- see qc_report.Rmd YAML header for definitions.
   # Leave as-is to use the report's built-in defaults, or override per project.
@@ -103,16 +114,22 @@ output_se <- if (isTRUE(config$save_annotated_se)) {
 
 # ------------------------------------------------------------------------------
 # Derive the tissue values to report on directly from the metadata, instead of
-# hardcoding a fixed list -- this works for any cohort/tissue set.
+# hardcoding a fixed list -- this works for any cohort/tissue set. NULL config$
+# tissue_col means "don't split by tissue" -- render_one() is then called once,
+# covering the whole cohort.
 # ------------------------------------------------------------------------------
-tissue_values <- sort(unique(as.character(rnaAnnot[[config$tissue_col]])))
+tissue_values <- if (!is.null(config$tissue_col)) {
+  sort(unique(as.character(rnaAnnot[[config$tissue_col]])))
+} else {
+  NULL
+}
 
-render_one <- function(tissue_value) {
-  tag <- gsub("[^A-Za-z0-9]+", "", tissue_value)
+render_one <- function(tissue_value = NULL) {
+  tag <- if (!is.null(tissue_value)) gsub("[^A-Za-z0-9]+", "", tissue_value) else "all_samples"
   out_subdir <- file.path(config$output_dir, tag)
   dir.create(out_subdir, recursive = TRUE, showWarnings = FALSE)
 
-  message("Rendering QC report for tissue='", tissue_value, "' ...")
+  message("Rendering QC report for ", if (!is.null(tissue_value)) paste0("tissue='", tissue_value, "'") else "the whole cohort", " ...")
 
   rmarkdown::render(
     "qc_report.Rmd",
@@ -124,6 +141,7 @@ render_one <- function(tissue_value) {
       column_map = config$column_map,
       tissueType = config$report_title,
       tissue = tissue_value,
+      group_vars = config$group_vars,
       qc_cutoffs = config$qc_cutoffs,
       priority_list_file = config$priority_list_file,
       output_se = output_se,
@@ -137,8 +155,12 @@ render_one <- function(tissue_value) {
   )
 }
 
-for (tv in tissue_values) {
-  render_one(tv)
+if (is.null(tissue_values)) {
+  render_one(NULL)
+} else {
+  for (tv in tissue_values) {
+    render_one(tv)
+  }
 }
 
 # ------------------------------------------------------------------------------

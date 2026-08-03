@@ -190,3 +190,38 @@ edit `qc_report.Rmd`):
 | `somalier_relatedness` | 0.6 | Cross-patient somalier relatedness ≥ 0.6 (possible swap) |
 | `hla_match` | 0.6 | Cross-patient HLA genotype match ≥ 0.6 (possible swap) |
 
+## Per-sample QC flag summary
+
+The report's final section ("Flagged QC samples") is a synthesis step — it doesn't
+compute anything new, it pulls together every QC signal already computed by the
+earlier sections into one per-sample table of boolean `flag_*` columns, plus a
+total severity count:
+
+| Flag | Trigger | Where it comes from |
+|---|---|---|
+| `flag_somalier_cross_patient` | Somalier relatedness ≥ `somalier_cutoff` (0.6) between two samples that `rnaAnnot$patient_id` says belong to *different* patients | Sample Swap/Contamination Check section |
+| `flag_hla_cross_patient` | Same idea, but via arcasHLA genotype match score ≥ `hla_cutoff` (0.6) — an independent identity check | HLA Genotype Quality Assessment section |
+| `flag_low_tin_rin` | TIN < 50 **and** RIN < 5 (both low) | TIN/RIN scatterplot section |
+| `flag_3prime_bias` | RNA-SeQC median 3' bias > 0.5 | degraded/older RNA signature |
+| `flag_low_genes_or_high_exon_cv` | Genes detected < 5000 **or** median exon CV > 1.0 | low library complexity / uneven coverage |
+| `flag_high_rrna` | rRNA rate > 1% | poor rRNA depletion |
+| `flag_low_dv200` | DV200 < 50 | degraded RNA (fragment size) |
+| `flag_high_hetero` | Somalier mean heterozygosity rate > 0.5 | possible contamination |
+| `flag_expr_corr_outlier` | Sample is a ±2 SD outlier in pairwise gene-expression correlation with the rest of the cohort | Sample-Sample correlation heatmap section |
+| `flag_expr_pca_outlier` | Sample falls outside ±2 SD on PC1/PC2 of the gene-expression PCA | "PCA plot colored by outliers" section |
+| `flag_many_qc_outliers` | Sample was flagged as a ±2 SD outlier on **more than 6** individual QC metrics | QC histogram/tally section |
+| `flag_QC_PC_outlier` | Sample falls outside ±2 SD on PC1/PC2 of a PCA run on *all* numeric QC metrics together (not expression) | computed within the flag-summary chunk itself |
+| `flag_sex_near_boundary`, `flag_sex_within_group_outlier`, `flag_sex_QC_PC_outlier` | Sample's inferred sex is ambiguous (near the M/F PC1 boundary) or an outlier within its own inferred-sex cluster — possible mislabeling/swap | Sex-check (XIST/Y-linked gene) section |
+
+Each flag is computed by cross-referencing `sample_id` against whatever
+outlier/flag list the corresponding earlier section already produced — this step
+just joins them all onto one table by `sample_id`. `n_flags` then sums how many
+`flag_*` columns are `TRUE` for each sample, as a simple per-sample severity score.
+
+This table is rendered as a scrollable interactive table in the report, and
+separately written to disk as `params$qcFile` (default `qc_flag_summary.tsv`) —
+that TSV is the actual per-sample QC deliverable. The next section in the report
+("Heatmap of all QC flags") visualizes the same `flag_*` columns as a heatmap
+sorted by `n_flags`, grouped into categories (Identity / RNA integrity / Library
+quality / Expression outlier / Global failure).
+

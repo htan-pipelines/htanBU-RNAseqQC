@@ -1921,8 +1921,12 @@ qc_tbl <- qc_tbl %>%
 # keep only numeric QC metrics
 df_qc_num <- df_qc[, sapply(df_qc, is.numeric)]
 
-# remove columns with zero variance
-df_qc_num <- df_qc_num[, apply(df_qc_num, 2, sd, na.rm=TRUE) > 0]
+# Remove columns with zero variance OR any non-finite (NA/NaN/Inf) values. Real QC
+# data commonly has a missing value for some metric on some sample -- base R's
+# scale() doesn't skip NAs (a single NA z-scores an entire column to all-NA), and
+# prcomp()/svd() can't handle NA/Inf at all ("infinite or missing values in 'x'"),
+# so this must be checked before scaling, not just non-zero variance.
+df_qc_num <- df_qc_num[, apply(df_qc_num, 2, function(x) all(is.finite(x)) && sd(x) > 0)]
 
 # z-score scale QC metrics (column-wise scaling)
 z <- scale(df_qc_num)

@@ -89,19 +89,7 @@ rnaAnnot <- read.table(config$rnaAnnot_path, sep = "\t", header = TRUE)
 somalier_pairs <- read.delim(config$somalier_pairs_path, header = TRUE, stringsAsFactors = FALSE)
 genotypes <- read.delim(config$genotypes_path)
 
-# ------------------------------------------------------------------------------
-# EXAMPLE (commented out): one-off sample ID correction.
-# Real cohorts occasionally need a fix like this (e.g. a biospecimen ID was
-# entered incorrectly upstream). This is study-specific and NOT part of the
-# general pipeline -- uncomment and adapt only if you actually need it, and do
-# it once, on cleaned copies of your files, rather than on every render.
-# ------------------------------------------------------------------------------
-# old_id <- "OLD_SAMPLE_ID"; new_id <- "CORRECTED_SAMPLE_ID"
-# colnames(se)[colnames(se) == old_id] <- new_id
-# rnaAnnot[[config$column_map$sample_id]][rnaAnnot[[config$column_map$sample_id]] == old_id] <- new_id
-# somalier_pairs$X.sample_a[somalier_pairs$X.sample_a == old_id] <- new_id
-# somalier_pairs$sample_b[somalier_pairs$sample_b == old_id] <- new_id
-# genotypes$subject[genotypes$subject == old_id] <- new_id
+
 
 dir.create(config$output_dir, recursive = TRUE, showWarnings = FALSE)
 

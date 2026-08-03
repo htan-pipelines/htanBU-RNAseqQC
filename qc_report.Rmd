@@ -688,9 +688,7 @@ genotype.pairs <- function(x) {
   return(comp)
 }
 
-# Preprocess the genotypes param (already read in by render_qc_report.R / your caller;
-# NOTE: this used to re-read a hardcoded "TerraOutput/genotypes.tsv" path here, silently
-# ignoring params$genotypes -- fixed so the report always uses what was passed in)
+# Preprocess the genotypes param (already read in by render_qc_report.R 
 genotypes <- genotypes %>%
   arrange(subject) %>%
   column_to_rownames("subject")  # Convert "subject" column to rownames
@@ -1292,9 +1290,7 @@ for (i in 1:ncol(qcMetrics.subset)) {
   }
 }
 # Filter dataset to remove constant QC metrics
-# NOTE: `-rm.ix.qc` errors ("invalid argument to unary operator") when rm.ix.qc is
-# NULL, i.e. when no QC metric happens to be constant across this tissue subset
-# -- guard so that case (a real possibility, not just an edge case) doesn't crash.
+
 qc.metrics.unique.col <- if (length(rm.ix.qc) > 0) qcMetrics.subset[-rm.ix.qc] else qcMetrics.subset
 
 # ------------------------------------
@@ -1509,8 +1505,7 @@ colnames(QCPC.table) <- c("PC", "Metric")
 
 ```
 
-
-Of all of the QC metrics, 60 were most associated, either positively or negatively, to PC1. 
+ 
 
 
 ### Heatmap QC outliers
@@ -1692,12 +1687,6 @@ if (nrow(sex.expr) > 0) {
 
 
 sex.expr.z<-t(scale(t(sex.expr),center=T,scale=T))
-# BUG FIX from the original script: this used to hardcode
-# `c(rep("Male", 6), "Female")`, i.e. it assumed exactly 6 Y-linked genes were
-# present, in a fixed order, followed by XIST -- silently mislabeling rows
-# whenever a marker gene was absent from the SE (a real risk on any dataset
-# other than the original one). Build the row-level marker-type annotation
-# from the actual surviving gene rownames instead.
 marker_type <- ifelse(rownames(sex.expr.z) %in% "XIST", "X-linked (XIST)", "Y-linked")
 annot_row <- data.frame(marker_type = factor(marker_type, levels = c("Y-linked", "X-linked (XIST)")))
 rownames(annot_row) <- rownames(sex.expr.z)

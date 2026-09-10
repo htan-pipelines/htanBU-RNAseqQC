@@ -1,0 +1,29 @@
+# This CITATION.cff file was generated with cffinit.
+# Visit https://bit.ly/cffinit to generate yours today!
+
+cff-version: 1.2.0
+title: htan-pipelines/htanBU-RNAseqQC
+message: >-
+  If you use this software, please cite it using the
+  metadata from this file.
+type: software
+authors:
+  - given-names: Yohana
+    family-names: Kefella
+    email: ykefella@bu.edu
+    name-particle: Yohana
+  - given-names: Joshua
+    family-names: Campbell
+    email: camp@bu.edu
+  - given-names: Jennifer
+    family-names: Beane
+    email: jbeane@bu.edu
+identifiers:
+  - type: url
+    value: 'https://github.com/htan-pipelines/htanBU-RNAseqQC'
+abstract: >-
+  A downstream, cohort-level QC pipeline for bulk RNA-seq
+  data processed with the
+  htan-pipelines/bulk-rna-seq-pipeline.
+version: '1'
+date-released: '2026-07-15'

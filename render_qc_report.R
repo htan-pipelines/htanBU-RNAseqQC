@@ -159,7 +159,17 @@ source("generate_somalier_network.R")
 generate_somalier_network(
   somalier_pairs = somalier_pairs,
   output_html = file.path(config$output_dir, "somalier_network_graph.html"),
-  cutoff = config$qc_cutoffs$somalier_relatedness
+  cutoff = config$qc_cutoffs$somalier_relatedness,
+  # Use the patient_id already assigned in rnaAnnot (via column_map) instead of
+  # guessing from the sample ID string, so the network's patient grouping stays
+  # consistent with the rest of the QC report. rnaAnnot here still has its
+  # ORIGINAL column names (column_map is only applied inside qc_report.Rmd), so
+  # look up sample/patient by the raw source column names from config$column_map.
+  sample_to_patient = sample_to_patient_from_annot(
+    rnaAnnot,
+    sample_col = config$column_map$sample_id,
+    patient_col = config$column_map$patient_id
+  )
 )
 
 message("Done. Reports written under: ", normalizePath(config$output_dir))

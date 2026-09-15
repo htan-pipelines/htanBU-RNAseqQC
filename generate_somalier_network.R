@@ -36,6 +36,40 @@ default_sample_to_patient <- function(sample_ids) {
   sapply(strsplit(sample_ids, "_"), function(x) paste(x[seq_len(min(2, length(x)))], collapse = "_"))
 }
 
+#' Build a `sample_to_patient` function from an existing metadata table (e.g.
+#' rnaAnnot) instead of guessing from the sample ID string -- keeps the network's
+#' patient grouping consistent with the patient_id already used elsewhere in the
+#' QC report. Any sample ID not found in `rnaAnnot` (e.g. present in
+#' somalier.pairs.tsv but dropped from rnaAnnot) falls back to `fallback`, with a
+#' warning naming the affected samples.
+#'
+#' @param rnaAnnot data.frame containing a sample ID column and a patient ID column.
+#' @param sample_col Name of the sample ID column in `rnaAnnot`.
+#' @param patient_col Name of the patient ID column in `rnaAnnot`.
+#' @param fallback Function used for sample IDs missing from `rnaAnnot`.
+#'   Defaults to `default_sample_to_patient()`.
+sample_to_patient_from_annot <- function(rnaAnnot,
+                                          sample_col = "sample_id",
+                                          patient_col = "patient_id",
+                                          fallback = default_sample_to_patient) {
+  stopifnot(sample_col %in% names(rnaAnnot), patient_col %in% names(rnaAnnot))
+  lookup <- setNames(as.character(rnaAnnot[[patient_col]]), as.character(rnaAnnot[[sample_col]]))
+
+  function(sample_ids) {
+    patient_ids <- unname(lookup[sample_ids])
+    missing <- sample_ids[is.na(patient_ids)]
+    if (length(missing) > 0) {
+      warning("generate_somalier_network: ", length(missing),
+              " sample ID(s) from somalier_pairs not found in rnaAnnot -- falling back to ",
+              "default_sample_to_patient() for: ",
+              paste(utils::head(missing, 10), collapse = ", "),
+              if (length(missing) > 10) ", ..." else "")
+      patient_ids[is.na(patient_ids)] <- fallback(missing)
+    }
+    patient_ids
+  }
+}
+
 #' Generate an interactive somalier relatedness network and save it as a
 #' standalone HTML file.
 #'
@@ -48,7 +82,9 @@ default_sample_to_patient <- function(sample_ids) {
 #'   the two to agree.
 #' @param sample_to_patient Function mapping a character vector of sample IDs
 #'   to patient/participant IDs, used only for node coloring/grouping and to
-#'   flag cross-patient edges. Defaults to `default_sample_to_patient()`.
+#'   flag cross-patient edges. Defaults to `default_sample_to_patient()` (a
+#'   naming-convention guess); prefer `sample_to_patient_from_annot()` to reuse
+#'   the patient_id already assigned in rnaAnnot elsewhere in the QC report.
 generate_somalier_network <- function(somalier_pairs,
                                        output_html = "somalier_network_graph.html",
                                        cutoff = 0.6,

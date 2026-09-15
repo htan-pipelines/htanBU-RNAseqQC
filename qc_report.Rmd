@@ -20,9 +20,10 @@ params:
   # This report standardizes on the canonical column names below (right-hand side).
   # Point each entry at whatever column holds that information in YOUR rnaAnnot file.
   # Only `sample_id` is strictly required to match colnames(se); `tissue_type`,
-  # `collection_site`, and `cohort` are all fully optional -- if your cohort doesn't
-  # have one of these concepts (e.g. a single-tissue study), just omit that entry (or
-  # leave it NULL) and the corresponding sections/plots are skipped automatically.
+  # `collection_site`, `cohort`, and `batch_id` are all fully optional -- if your
+  # cohort doesn't have one of these concepts (e.g. a single-tissue study, or no
+  # tracked sequencing batch), just omit that entry (or leave it NULL) and the
+  # corresponding sections/plots are skipped automatically.
   # `group_vars` (below) doesn't need a column_map entry at all -- any column present
   # in rnaAnnot after this mapping, including ones with no canonical slot here (e.g. a
   # study-specific "Adequacy_group"), can be named directly.
@@ -262,6 +263,10 @@ if (length(mismatched_ids) > 0) {
 # all) simply skip every tissue_type-specific section/subsetting step below.
 has_tissue_type <- "tissue_type" %in% colnames(rnaAnnot)
 if (!has_tissue_type) tissue <- NULL
+
+# `batch_id` is fully optional: cohorts that don't track a sequencing batch simply
+# skip the "Batch information" / PCA-by-batch section below.
+has_batch_id <- "batch_id" %in% colnames(rnaAnnot)
 
 # Drop any group_vars entries that don't actually exist in rnaAnnot (e.g. a typo, or
 # a column_map mismatch) rather than erroring deep inside some later plot.
@@ -1238,10 +1243,20 @@ safe_ggplotly(plot4)
 The PCA plot shows the first two principal components of the log cpm transformed expression data 
 Color illustrates if samples are outliers based on -+2 standard deviation away from the mean and shape indicates where samples originate. 
 
-## Batch information {.tabset .tabset-fade}
-### PCA batch  
-color PCA plot by batch and see if you observe visual separation of the samples 
-```{r, pca_batch, fig.width = 10, fig.height = 8}
+```{r batch_header, results = "asis"}
+# results='asis' + a conditional cat() heading (same pattern as tissue_type_panel
+# above) so the whole "Batch information" tabset is skipped ENTIRELY -- not just
+# left empty -- when there's no batch_id column. A plain `eval=` on the plot chunk
+# alone would still leave behind these static markdown headings with nothing under
+# them, since they live outside the chunk.
+if (has_batch_id) {
+  cat("\n\n## Batch information {.tabset .tabset-fade}\n\n")
+  cat("### PCA batch\n\n")
+  cat("color PCA plot by batch and see if you observe visual separation of the samples\n\n")
+}
+```
+
+```{r, pca_batch, fig.width = 10, fig.height = 8, eval = has_batch_id}
 batch.sub <- as.factor(colData(se.subset)$batch_id)
 nb <- length(unique(batch.sub))
 mycolors <- colorRampPalette(brewer.pal(12, "Paired"))(nb)

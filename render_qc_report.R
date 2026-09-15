@@ -36,9 +36,9 @@ config <- list(
   genotypes_path = "path/to/your/genotypes.tsv",
 
   # Map YOUR metadata column names onto the canonical names the report expects.
-  # Must match params$column_map in qc_report.Rmd. tissue_type/collection_site/cohort
-  # are all optional -- if your cohort doesn't have one of these concepts, just omit
-  # that entry (or leave it NULL).
+  # Must match params$column_map in qc_report.Rmd. tissue_type/collection_site/cohort/
+  # batch_id are all optional -- if your cohort doesn't have one of these concepts,
+  # just omit that entry (or leave it NULL).
   column_map = list(
     sample_id       = "sample_id",         # must match colnames(se) after mapping
     patient_id      = "patient_id",

@@ -25,9 +25,9 @@ suppressPackageStartupMessages({
   library(htmlwidgets)
 })
 
-#' Default sample -> patient ID heuristic used by the original PCGA report:
+#' Default sample -> patient ID heuristic:
 #' takes the first two underscore-delimited tokens of the sample ID
-#' (e.g. "PCGA02_10044_1001842" -> "PCGA02_10044"). This is a naming-convention
+#' (e.g. "AL222_1235_2340505" -> "AL222_1235"). This is a naming-convention
 #' assumption, NOT something the bulk-rna-seq-pipeline itself defines -- override
 #' `sample_to_patient` with your own function (or a named lookup vector wrapped
 #' in a function) if your sample IDs don't follow a "prefix_patient_specimen"
